@@ -289,6 +289,25 @@ def print_regrade(opn):
         print(f"  {v:>4}  {k}")
 
 
+def print_markdown(opn, limit=200):
+    """Emit a GitHub-markdown ranking table (for the design-doc appendix)."""
+    before = sorted(opn, key=current_rank_key)
+    after = sorted(opn, key=lambda i: score(i)[0], reverse=True)
+    before_rank = {i["number"]: n for n, i in enumerate(before)}
+
+    print("| # | Score | Sev | Now | Δrank | Issue |")
+    print("|--:|--:|---|---|--:|---|")
+    for n, i in enumerate(after[:limit]):
+        sc, sn = score(i)
+        b = before_rank[i["number"]]
+        delta = b - n
+        arrow = f"+{delta}" if delta > 0 else str(delta)
+        title = i["title"].replace("|", "\\|")[:70]
+        num = i["number"]
+        link = f"[#{num}](https://github.com/omnigent-ai/omnigent/issues/{num})"
+        print(f"| {n + 1} | {sc:.0f} | {sn} | {current_prio(i)} | {arrow} | {link} {title} |")
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     flags = {a for a in sys.argv[1:] if a.startswith("--")}
@@ -299,6 +318,9 @@ def main():
 
     if "--regrade" in flags:
         print_regrade(opn)  # priority-label backfill preview
+    elif "--markdown" in flags:
+        limit = next((int(a) for a in args[1:] if a.isdigit()), 200)
+        print_markdown(opn, limit)  # markdown table for the doc appendix
     else:
         print_score_ranking(opn)  # composite-score before->after (default)
 
