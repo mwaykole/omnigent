@@ -186,6 +186,34 @@ truth. Per-harness *filtering* is still available via the area routing if a
 maintainer wants it, without a label per harness. (Alternative considered and
 rejected in Appendix A.)
 
+### Component taxonomy — which `comp:` labels to add
+
+There are 8 `comp:` labels today, and several are mega-buckets because each
+merges multiple `areas.json` areas. The bar for a new label is deliberately
+high: **split only when you'd actually filter on it, or when it changes how the
+issue is graded** — every split costs new labels + an `areas.json` mapping + a
+classifier-allowlist update + a one-time backfill, and the repo has *no
+label-sync* by design. By that test:
+
+| Label | Open | Recommendation |
+|---|---|---|
+| `comp:harnesses` | 148 | Split by **tier** — `-t1/-t2/-t3` (Axis 3). |
+| `comp:runner` | 109 | **Carve out `comp:sandbox`** (~29 of the 109 are sandbox/isolation: bwrap/seatbelt/egress). Distinct discipline, security-grade severity, home of the top P0 (#3557). Makes the security surface *filterable*, not just score-boosted. |
+| `comp:web-ui` | 99 | **Add `comp:mobile`** (~23: iOS/Android OIDC, renderer death, iPad layout) — a different failure domain and reporter set from browser-web (~55). Defer `comp:desktop`/electron (~11): borderline, revisit if it grows. |
+| `comp:server` | 135 | **Leave as-is.** Its sub-buckets (host 55, db 36, sdk 65) overlap heavily on the same session/API issues; splitting would just multi-label without aiding prioritization. |
+| `comp:tui` · `comp:infra` · `comp:repr` · `comp:policies` | 40 / 34 / 13 / 21 | **Leave as-is** — small enough to prioritize within; splitting adds labels without payoff. `comp:policies` already isolates the guardrail surface. |
+
+Net new labels: **`comp:sandbox`** and **`comp:mobile`** (plus the three harness
+tier labels). Everything else stays. `sandbox` and `policies` remain
+first-class (see Sandbox / security below); we're promoting `sandbox` from an
+area that collapses into `comp:runner` to its own label, not inventing a new
+concept.
+
+Naming note: `comp:sandbox` (narrow) is preferred over a broad `comp:security`
+umbrella — "security" would pull in the 120 credential/auth issues that mostly
+belong to `comp:server`/onboarding, re-creating a mega-bucket. Sandbox/policy
+*bypass* severity is handled by the rubric (Axis 2), not by an umbrella label.
+
 ### Axis 4 — The composite score (the ordering primitive)
 
 ```
@@ -401,9 +429,9 @@ severity**, not a functional one.
 
 Two concrete changes:
 
-- **Component:** `sandbox` and `policies` are already distinct areas in
-  `areas.json` (mapping to `comp:runner` / `comp:policies`). Keep them
-  first-class; don't fold them into the harness buckets.
+- **Component:** promote `sandbox` to its own `comp:sandbox` label (today it
+  collapses into `comp:runner`); `policies` already has `comp:policies`. See
+  "Component taxonomy" above for the full rationale.
 - **Severity:** the rubric's P0 row explicitly names "security/policy/sandbox
   bypass," and the grader should treat *escape / bypass / credential-crossing*
   as top-tier severity regardless of reach — a one-user sandbox escape is still
@@ -417,8 +445,10 @@ Two concrete changes:
    rubric (grade FRs across buckets; security/sandbox → P0) + the "P1 scarcity"
    guardrail + emit `severity` and `readiness` fields. Low risk, affects new
    issues immediately.
-2. **Harness tier labels** — add `comp:harness-t1/-t2/-t3`, map each harness
-   area in `areas.json` to a tier, backfill existing `comp:harnesses` issues.
+2. **Component labels** — add `comp:harness-t1/-t2/-t3` (map each harness area
+   in `areas.json` to a tier), plus `comp:sandbox` and `comp:mobile`; update the
+   classifier allowlist and backfill existing `comp:harnesses` / `comp:runner` /
+   `comp:web-ui` issues into the new labels. See "Component taxonomy."
 3. **Template fields** — add Harness / Platform / Impact dropdowns.
 4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
    that reads LLM-graded severity + readiness + dup count and publishes the
