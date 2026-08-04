@@ -203,6 +203,19 @@ def dup_reach(i):
     return 1.0 + min(0.5, 0.15 * n)  # +15% per dup, capped at +50%
 
 
+# Age is NEUTRAL by default (design review: an unfixed old bug isn't less
+# important — if anything it should escalate, not decay). Set DECAY_OLD=True
+# only to reproduce the earlier decaying variant for comparison.
+DECAY_OLD = False
+
+
+def age_factor(i):
+    if not DECAY_OLD:
+        return 1.0
+    a = age_days(i)
+    return 1.0 if a < 30 else max(0.7, 1.0 - (a - 30) / 200)
+
+
 def score(i):
     sname, sw = severity(i)
     s = sw * reach(i) * tier_mult(i) * dup_reach(i) * readiness(i)
@@ -211,8 +224,7 @@ def score(i):
         s *= 1.0 + FR_DEMAND_MAX * d  # demand LEADS for feature requests
     else:
         s += BUG_DEMAND_MAX * d  # demand is only a tiebreak for bugs
-    a = age_days(i)
-    s *= 1.0 if a < 30 else max(0.7, 1.0 - (a - 30) / 200)  # gentle decay for very old
+    s *= age_factor(i)
     return s, sname
 
 
