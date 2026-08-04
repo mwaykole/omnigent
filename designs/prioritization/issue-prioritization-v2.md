@@ -316,6 +316,49 @@ just **re-grading severity** — the same field the classifier already sets:
    #2125) is upstream — grade severity honestly (Axis 2); the score reads
    severity, so fixing severity fixes the order.
 
+#### Maintainer guide — hand-correcting the ranking
+
+The goal is a ranking good enough that **hand-correction is the exception, not
+the process** — a working target is **≤10% of issues touched**. If you're
+correcting more than that, the fix isn't more editing, it's tuning the prompt or
+weights (below). Two properties make correction cheap and safe:
+
+- **Corrections are sticky.** Triage runs `on: issues [opened]` only — it never
+  re-fires on edits, so a label you change by hand is never overwritten by the
+  bot. (The weekly re-score only *reads* labels; it doesn't re-grade.)
+- **One knob.** You change the **priority label** (the field the classifier
+  emits). The score is a pure function of it plus mechanical factors — no
+  separate override to learn.
+
+**When to correct** — reach for it only when the *grade* is wrong, not when you
+merely disagree with a neighbor in a tie:
+
+| Symptom | Action |
+|---|---|
+| Grader misread severity (a real P1 sitting at P2, or vice versa) | Change the priority label. Done — it sticks. |
+| Right severity, wrong reach (e.g. "affects all users" missed) | Same: bump the label; reach feeds severity's bucket. |
+| A security/sandbox/policy **bypass** graded as ordinary | Set `P0-critical` — bypass is top severity regardless of reach (Axis 2). |
+| Blocked on the reporter | Add `needs-info` (drops readiness ×0.85); don't fight the score. |
+| You just prefer a different order *within the same grade* | **Don't.** Ties are arbitrary by design; re-grading here is noise. |
+
+**When NOT to correct — fix the system instead.** A hand-edit fixes one issue; a
+prompt fix fixes the class. Escalate from editing to tuning when:
+
+- The **same misgrade recurs** (e.g. every "sandbox bypass" *feature request*
+  gets graded critical — the #2057/#2054 class). Fix the classifier prompt in
+  `.github/triage/config.yaml`, not the issues one by one.
+- You cross the **~10% correction rate** in a re-score cycle. That's the signal
+  the weights (tier multipliers, demand cap, readiness) or the rubric need
+  tuning — re-run `score_prototype.py` against the new weights and eyeball the
+  before→after before shipping.
+- The **`Re-grade rate` metric** (below) trends up. It's the quantitative
+  version of the same signal.
+
+**What this is not:** there is no per-issue score override, no manual score
+number, no pin. Everything flows through the priority label so the ranking stays
+explainable — anyone can re-derive an issue's position from its label + factors,
+and there's no hidden hand-tuning to reverse-engineer later.
+
 ---
 
 ## Dry-run: before → after (methodical, on real issues)
@@ -492,9 +535,19 @@ Generated from today's snapshot with `score_prototype.py --markdown 200`
 (regex severity grader — the same stand-in used throughout; production uses
 the LLM grader). Columns: **Score** = composite score; **Sev** = re-graded
 severity; **Now** = current priority label; **Δrank** = movement vs the
-current priority-label ordering (positive = moved up). Regenerate any time to
-refresh. Read this as illustrative ordering — the regex grader's known false
-positives (e.g. #2057/#2054) are visible near the top.
+current priority-label ordering (positive = moved up).
+
+**Illustrative, not actionable.** This is the *mechanism* running on a
+deliberately-weak grader, so its own failures are visible on purpose: ranks 1–2
+(#2057/#2054) are FRs that merely *mention* "sandbox bypass" and are graded
+critical — they sit above the real P0 (#3557, rank 6), so **the very top is
+backwards**; #61 (rank 19) is a *bot* audit issue. That's the doc's thesis made
+concrete: regex can't grade severity. The scaffold is sound — strip those
+artifacts and the genuine tier-1 bugs (#3265, #3557, #3270, #3180, #2373)
+cluster correctly in the top 15. Scores also *tie* in coarse bands (nine issues
+share 99/92), so within-band order is arbitrary — read this as ~8 tiers, not 200
+ranks. With the LLM grader plus ≤10% hand-correction (see the maintainer guide),
+this is the shape the production ranking takes.
 
 | # | Score | Sev | Now | Δrank | Issue |
 |--:|--:|---|---|--:|---|
