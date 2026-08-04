@@ -30,19 +30,21 @@ NOW = datetime.datetime.now(datetime.timezone.utc)
 # Severity tiers are checked most-severe first; first match wins. Kept narrow
 # so a stray "credential" mention doesn't inflate everything to critical.
 SEVERITY = {
+    # NOTE: `severity()` lowercases the text before matching, so every pattern
+    # here MUST be lowercase — an uppercase literal can never match.
     "critical": (
         100,
         [
             r"\bdata ?loss\b",
             r"\bvulnerab",
-            r"\bCVE-\d",
-            r"\bRCE\b",
+            r"\bcve-\d",
+            r"\brce\b",
             r"\bexfiltrat",
             r"\bpolicy (?:gate|bypass)",
             r"\bsandbox (?:escape|bypass)",
             r"\bgates? (?:are )?bypass",
             r"\bcorrupt(?:s|ion|ed)\b",
-            r"\bPAT is offered",
+            r"\bpat is offered",
             r"\bleak(?:s|ed) (?:the |a )?(?:secret|token|credential)",
         ],
     ),
@@ -116,6 +118,9 @@ def severity(i):
     for name, (w, pats) in SEVERITY.items():
         if any(re.search(p, text) for p in pats):
             return name, w
+    # Fallbacks for issues that hit no keyword. An un-keyworded bug scores 25 —
+    # just below an explicit "medium" (30) so known-medium bugs sort above
+    # unknown ones; an un-keyworded FR scores 20 (see FR grading note in doc).
     return ("medium", 25) if "Bug" in labels(i) else ("feature", 20)
 
 
@@ -172,9 +177,33 @@ def age_days(i):
     return (NOW - parse(i["created_at"])).total_seconds() / 86400
 
 
+# Readiness: an actionable ticket (repro steps, a real body) is worth surfacing
+# above a vague one at the same severity — you can start on it now. A small
+# multiplier so it only breaks near-ties, never overrides severity.
+_REPRO = re.compile(r"steps to reproduce|reproduc|to reproduce", re.I)
+READINESS_MIN, READINESS_MAX = 0.85, 1.1
+
+
+def readiness(i):
+    if "needs-info" in labels(i):
+        return READINESS_MIN  # explicitly blocked on the reporter
+    body = i.get("body") or ""
+    ready = len(body) >= 400 and (_REPRO.search(body) or "enhancement" in labels(i))
+    return READINESS_MAX if ready else 1.0
+
+
+# Duplicate blast-radius: N confirmed duplicates of an issue means N reporters
+# hit it — a reach signal. Snapshot JSON doesn't carry dup links, so this reads
+# an optional `duplicate_count` the production job would populate from the
+# dedup labeler (see PR #4037). Defaults to no-op on the dry-run data.
+def dup_reach(i):
+    n = i.get("duplicate_count", 0)
+    return 1.0 + min(0.5, 0.15 * n)  # +15% per dup, capped at +50%
+
+
 def score(i):
     sname, sw = severity(i)
-    s = sw * reach(i) * tier_mult(i)
+    s = sw * reach(i) * tier_mult(i) * dup_reach(i) * readiness(i)
     d = _demand_signal(i)
     if "enhancement" in labels(i):
         s *= 1.0 + FR_DEMAND_MAX * d  # demand LEADS for feature requests

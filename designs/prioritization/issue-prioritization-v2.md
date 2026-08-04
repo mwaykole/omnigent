@@ -7,9 +7,10 @@ has lost its meaning. Today priority is a single collapsed axis (P1 vs P2 as a
 de-facto binary); it neither reflects how bad an issue is nor how many users it
 hits, and it doesn't move over time. This proposal keeps the working
 [triage pipeline](../issue-triage-proposal.md) and adds: a re-calibrated
-priority rubric, independent scoring axes (severity × reach × harness-tier +
-demand), a maintainer-facing ranked view, and a lightweight way to nudge
-ranking over time.
+priority rubric (severity graded across all buckets, for FRs too), independent
+scoring axes (severity × reach × harness-tier × readiness + demand, with
+duplicate count as a reach signal), a maintainer-facing ranked view, and
+re-gradable severity as the mechanism to nudge ranking over time.
 
 This is an evolution of, not a replacement for,
 [issue-triage-proposal.md](../issue-triage-proposal.md). The intake, the
@@ -36,9 +37,9 @@ is healthy.
 | **P2-medium** | **204** | 149 | 3.8d | 28.1d |
 | P3-low | 16 | 19 | 3.4d | 30.8d |
 
-- **125 of 207 open bugs (60%) are P1-high.** "Major feature broken, no
-  workaround" cannot describe 60% of bugs — P1 is inflated to the point of
-  being noise.
+- **125 of 207 open *bugs* (60%) are P1-high** (128 open P1 in total, incl. 3
+  non-bugs). "Major feature broken, no workaround" cannot describe 60% of bugs
+  — P1 is inflated to the point of being noise.
 - **P0 (3) and P3 (16) are vestigial.** Four buckets, two used.
 - **Open-issue age is flat across priorities** (P1 20.6d ≈ P2 28d ≈ P3 30d).
   If P1 were respected as urgent, P1 age would be far lower than P2. It isn't:
@@ -61,17 +62,22 @@ so routing knows the sub-area while the label throws it away. Within harnesses,
 title mentions skew hard to **claude (32) and codex (24)**, then kimi /
 antigravity / openai (~6 each) — a natural tier boundary.
 
-**5. Contributor + dedup funnels are unused vs. the design.**
-`good first issue` is on **0** open issues; only **5** issues ever closed as
-duplicate (0 currently labeled) — yet the triage design calls dedup the
-"highest-ROI automation." Both are latent, not wired.
+**5. Contributor funnel is unused; dedup is now landing.** `good first issue`
+is on **0** open issues. Dedup was previously latent (only 5 ever closed as
+duplicate), but the dedup labeler in
+[#4037](https://github.com/omnigent-ai/omnigent/pull/4037) is putting it in
+place — link + label, closure gated off by default. That changes the plan: we
+should **use duplicate *count* as a scoring signal** (N confirmed dupes = N
+reporters hit it = bigger blast radius), not auto-close — see Axis 5.
 
-**6. "Community volume" is mostly internal dogfood.** 320 of 360 open issues
-are NONE/CONTRIBUTOR-authored, but the bug titles read like insider reports
-("antigravity-native: TUI-typed turns never mirror"). Reactions are sparse —
-only **25 of 360** open issues have any 👍. Implication: **severity must lead
-the score; external demand is at most a tiebreak**, or the queue will look
-empty of signal.
+**6. Most issues are dogfood, by the MAINTAINER file.** Of 360 open issues,
+**36 are authored by a name in `.github/MAINTAINER`** → 324 "community." (The
+`author_association` field is a poor proxy: it marks 4 as MEMBER that aren't
+maintainers, so we key off the MAINTAINER file, which the triage pipeline
+already reads.) Even the 324 read like insider reports ("antigravity-native:
+TUI-typed turns never mirror"). Reactions are sparse — only **25 of 360** open
+issues have any 👍. Implication: **severity must lead the score; external
+demand is at most a tiebreak**, or the queue will look empty of signal.
 
 ---
 
@@ -88,12 +94,21 @@ enforced in the classifier prompt (`.github/triage/config.yaml`) and by a
 one-time backfill. The key change: **priority is a function of severity × reach,
 graded from content — not a type-default.**
 
-| Priority | Definition (must satisfy BOTH severity and reach) |
+| Priority | Definition (severity × reach — applies to bugs AND FRs) |
 |---|---|
-| **P0-critical** | Security/policy bypass, data loss, or all-users-down. Rare by construction. |
-| **P1-high** | High severity (crash / hang / permanent breakage / no workaround) **AND** broad reach (default config, all/most users, or a tier-1 harness). Not "a bug I care about." |
-| **P2-medium** | Real bug with a workaround, OR a substantive capability/feature. **Default for FRs**, but a P2 can outrank a P1 in the *score* (below) when its severity/demand is high — the label is a bucket, the score is the order. |
-| **P3-low** | Genuinely minor: cosmetic, polish, trivial convenience, narrow nice-to-have. |
+| **P0-critical** | Security/policy/sandbox bypass, data loss, or all-users-down. Rare by construction. |
+| **P1-high** | High severity (bug: crash / hang / permanent breakage, no workaround. FR: a capability whose *absence* blocks a common workflow) **AND** broad reach (default config, all/most users, or a tier-1 harness). Not "a thing I care about." |
+| **P2-medium** | Real bug with a workaround, OR a substantive capability/feature with a moderate reach. |
+| **P3-low** | Genuinely minor: cosmetic, polish, trivial convenience, narrow nice-to-have — bug or FR. |
+
+**FRs are graded, not defaulted.** The old prompt defaulted every FR to P2;
+that's the "all FRs are equal" trap. An FR gets P1 when its *absence* is a
+high-severity, broad-reach gap (e.g. [#16](https://github.com/omnigent-ai/omnigent/issues/16)
+native Windows — a whole platform can't run; [#2125](https://github.com/omnigent-ai/omnigent/issues/2125)
+multi-host git creds — blocks the common self-hoster setup), and P3 when it's a
+narrow nice-to-have. Bug-vs-FR is the *type* axis; it does not cap priority.
+(Practically, FR reach is still usually narrower than a crash's, so most FRs
+land P2/P3 — but by grading, not by rule.)
 
 Calibration guardrail added to the prompt: **"P1 is a scarcity signal. If more
 than ~20% of open bugs are P1, you are over-grading. A bug affecting one harness
@@ -108,14 +123,16 @@ existing `areas.json` harness areas** (no new hand-labeling):
 - **Tier 2** — `cursor`, `antigravity`, `copilot`, `gemini`/`openai`.
 - **Tier 3** — everything else (goose, hermes, kimi, kiro, opencode, pi, qwen).
 
-Tier is a **score multiplier**, not a visible label, so it can be re-weighted
-without relabeling. Optionally surface as `tier:1|2|3` labels later if
-maintainers want to filter on it.
-
-**Recommended, not required:** split `comp:harnesses` into per-harness labels
-so the 41% bucket becomes filterable. This is a bigger change (new labels + a
-label-sync step, which the repo deliberately avoids today) — see Appendix A. If
-we don't split, tier-as-multiplier still recovers most of the value.
+Tier is a **score multiplier**, and we split the `comp:harnesses` mega-bucket
+(41% of open) with **tier labels — `comp:harness-t1` / `-t2` / `-t3`** — rather
+than per-harness labels (`comp:harness-claude`, …). Tier labels are more
+future-proof: adding a harness or re-tiering one edits `areas.json` (which
+already maps each harness area) and re-runs a backfill, without inventing a new
+label each time a harness ships. The mapping (area → tier) lives in
+`areas.json`, so the tier label and the score multiplier share one source of
+truth. Per-harness *filtering* is still available via the area routing if a
+maintainer wants it, without a label per harness. (Alternative considered and
+rejected in Appendix A.)
 
 ### Axis 4 — The composite score (the ordering primitive)
 
@@ -123,15 +140,37 @@ we don't split, tier-as-multiplier still recovers most of the value.
 base  = severity_weight              # LLM-graded from content (P0/P1/P2/P3-ish, 0–100)
       × reach_multiplier             # all-users/default 1.5 · normal 1.0 · single-platform 0.9
       × harness_tier_multiplier      # T1 1.4 · T2 1.1 · T3 0.9 · non-harness 1.0
+      × dup_reach                    # +15% per confirmed duplicate, capped +50% (Axis 5)
+      × readiness                    # ready-to-work 1.1 · normal 1.0 · needs-info 0.85 (Axis 6)
 
 score = apply_demand(base, type)     # type-dependent — see "Community demand" below
       × recency_factor               # 1.0 fresh; gentle decay past ~30d (tunable)
-      + manual_pin                   # maintainer override (see "eyeball" below)
 ```
 
 Every weight is a named constant in one place. The score is **advisory
 ordering** layered on top of the labels; labels stay authoritative for
 filtering, the score decides *what to look at first*.
+
+**Worked example — one issue, data points → score.** Take
+[#3265](https://github.com/omnigent-ai/omnigent/issues/3265) ("claude-sdk agent
+with linux_bwrap dies at spawn"):
+
+| Factor | Value | Why |
+|---|---|---|
+| severity | 60 (high) | body matches "cannot start" / spawn death — a hard failure, no workaround |
+| × reach | × 1.0 | affects the linux_bwrap sandbox config, not literally all users |
+| × harness_tier | × 1.4 | title says `claude-sdk` → tier-1 |
+| × dup_reach | × 1.0 | no confirmed duplicates (yet) |
+| × readiness | × 1.1 | 400+ char body with repro steps → ready to work |
+| = base | **92.4** | |
+| × demand (bug) | + 0 | 0 reactions; bugs get only the additive tiebreak |
+| × recency | × 1.0 | 10 days old, under the 30-day decay threshold |
+| **= score** | **≈ 92** | ranks **#3** of 360 (was #37 by priority label) |
+
+Contrast a vague, low-tier ticket: severity 30 (medium) × reach 0.9
+(single-platform) × tier 0.9 (tier-3 harness) × readiness 1.0 ≈ **24** — an
+order of magnitude lower, so it sits deep in the queue. That gap is the point:
+the score turns four cheap data points into an order.
 
 **Why severity is LLM-graded, not label-derived:** the dry-run
 (`score_prototype.py`) grades severity with regex for reproducibility, and it
@@ -173,22 +212,50 @@ external FRs, over-weighting demand would systematically bias a
 dogfood-bug-heavy backlog toward features. Bounding it (and splitting by type)
 keeps severity as the driver.
 
-### Ongoing adjustment — the "eyeball / upgrade over time" mechanism
+### Axis 5 — Duplicate reach
 
-Prioritization is not a one-shot classification. Three cheap levers:
+The dedup labeler ([#4037](https://github.com/omnigent-ai/omnigent/pull/4037))
+links and labels duplicates without auto-closing. That gives us a reach signal
+for free: **N confirmed duplicates means N reporters hit the same issue.**
+`dup_reach` bumps the score +15% per confirmed duplicate, capped at +50%, so a
+frequently-reduplicated bug rises without letting a pile-on dominate severity.
+The scoring job reads the dup count from the labeler's linked issues; the
+dry-run stubs it (`duplicate_count`, default 0) since the snapshot JSON doesn't
+carry dup links.
+
+### Axis 6 — Readiness
+
+A ticket you can *start on now* — repro steps, a real body — is worth surfacing
+above an equally-severe but vague one. `readiness` is a small multiplier: 1.1
+for a bug with a repro section and a ≥400-char body (or any substantive FR),
+0.85 for anything labeled `needs-info` (explicitly blocked on the reporter),
+1.0 otherwise. It's deliberately gentle — it breaks near-ties, it never
+overrides severity. On the current backlog it bumps 272 issues, penalizes only
+the 4 `needs-info` ones (today `needs-info` is applied to **0** open bugs, so
+this also gives the classifier a reason to use it). Cheap to compute from
+existing fields; the production grader can set it directly.
+
+### Ongoing adjustment — re-grade severity, don't add a pin lever
+
+Prioritization is not a one-shot classification, but the adjustment lever is
+just **re-grading severity** — the same field the classifier already sets:
 
 1. **Periodic re-score.** A scheduled job (weekly) recomputes the score for all
    open issues and posts/updates a single **ranked view** (a pinned issue or a
-   generated `PRIORITY-QUEUE.md`), so demand/age changes are reflected without
-   re-triaging. Cheap: no LLM call needed for re-score if severity is cached as
-   a label/field at triage time.
-2. **Manual pin / nudge.** Maintainers add `pin:high` / `pin:low` (or 👍 on a
-   tracking comment) to force an issue up or down; `manual_pin` in the score
-   honors it. This is the direct answer to "#2125 is a high-severity P2" — a
-   maintainer bumps it once and it sticks.
-3. **Severity is re-gradable.** Because severity is a field, not baked into the
-   priority bucket, re-triage (`/retriage` slash command or label toggle) can
-   revise it as understanding of an issue evolves.
+   generated `PRIORITY-QUEUE.md`), so demand/age/dup changes are reflected
+   without re-triaging. Cheap: no LLM call needed for re-score if severity is
+   cached as a field at triage time.
+2. **Re-grade severity to bump.** To push an issue up or down, a maintainer
+   changes its priority/severity label (P2 → P1) — exactly what you asked: "I
+   can bump P2 → P1 or vice versa." No separate `pin:high` / `pin:low` lever.
+   A dedicated pin was in the previous draft; it's dropped as over-engineering
+   — a second override that means the same thing as changing severity, but out
+   of band from it. One knob, and it's the one maintainers already use.
+
+The earlier draft leaned on `pin` to rescue "high-severity P2s" like #2125. The
+better fix is upstream: grade severity honestly in the first place (Axis 2) so
+#2125 lands where it belongs, and re-grade if it's wrong. The score reads
+severity; fixing severity fixes the score.
 
 ---
 
@@ -198,6 +265,20 @@ Prioritization is not a one-shot classification. Three cheap levers:
 and prints **current-priority ordering vs composite-score ordering**, with a
 rank delta per issue, so we tune weights against real test cases.
 
+**Is severity re-graded in these examples?** Yes — the dry-run ignores the
+existing priority label entirely and *re-grades severity from content* (regex
+stand-in for the LLM), so the "After" column is a fresh grade, not a re-sort of
+the old labels. The regex grade distribution across the 360 open issues:
+
+| Grade | critical | high | medium | low | (FR default) |
+|---|---|---|---|---|---|
+| Count | 8 | 85 | 183 | 3 | 81 |
+
+That shape is itself a sanity check: **critical is scarce (8)**, most bugs are
+medium, and `low` is under-detected by regex (only 3) — a real grader would find
+more genuinely-minor issues. It's the inverse of today's inflated-P1 label
+distribution, which is the goal.
+
 Selected results (360 open issues; rank out of 360, lower = higher priority):
 
 **Severity surfaces real bugs the label buried:**
@@ -205,35 +286,35 @@ Selected results (360 open issues; rank out of 360, lower = higher priority):
 | Issue | Before | After | Δ | Note |
 |---|---|---|---|---|
 | #3557 policy-gate bypass (P0) | 1 | 6 | −5 | Real P0 stays near top ✅ |
-| #3265 claude-sdk bwrap spawn death (P1) | 37 | 3 | +34 | High-sev, tier-1 harness ✅ |
+| #3265 claude-sdk bwrap spawn death (P1) | 37 | 3 | +34 | High-sev, tier-1 harness, has repro ✅ |
 | #3270 sub-agent sessions absent (P1) | 35 | 7 | +28 | ✅ |
-| #2421 codex MCP bridge child leak (P1) | 80 | 20 | +60 | Resource leak, tier-1 ✅ |
-| #2454 unbounded ~/.omnigent growth (P1) | 72 | 19 | +53 | ✅ |
+| #2421 codex MCP bridge child leak (P1) | 80 | 27 | +53 | Resource leak, tier-1 ✅ |
+| #2454 unbounded ~/.omnigent growth (P1) | 72 | 26 | +46 | ✅ |
 
 **Community demand lifts wanted FRs — bounded, so bugs stay on top:**
 
 | Issue | 👍 | Before | After | Δ | Note |
 |---|---|---|---|---|---|
-| #1021 GitHub Copilot as provider (FR) | 10 | 299 | 93 | +206 | Most-wanted FR climbs; demand pushed score 31→48 ✅ |
-| #16 native Windows support (FR) | 6 | 334 | 32 | +302 | High demand + broad reach ✅ |
-| #888 side-by-side multi-session (FR) | 2 | 305 | 29 | +276 | ✅ |
+| #1021 GitHub Copilot as provider (FR) | 10 | 299 | 92 | +207 | Most-wanted FR climbs; demand alone pushed it up ✅ |
+| #16 native Windows support (FR) | 6 | 334 | 32 | +302 | High demand + graded P1 (whole platform) ✅ |
+| #888 side-by-side multi-session (FR) | 2 | 305 | 30 | +275 | ✅ |
 
 **Dry-run limits — the evidence that severity must be LLM-graded, not regex:**
 
 | Issue | Before | After | Note |
 |---|---|---|---|
-| #2057 / #2054 Codex-mode FRs | 236/238 | 1/2 | **False positive** — "sandbox bypass" tripped the critical regex. LLM grader avoids. |
-| #61 bot "Code Audit" (P3) | 349 | 12 | **False positive** — audit issue mentioning security. LLM grader avoids. |
-| #2125 multi-host git creds (P2, FR) | 232 | 324 | **False negative** — a real capability gap, but no severity keyword and only 1 👍, so it *sinks*. The LLM grader (or a `pin:high`) is exactly what rescues it. |
+| #2057 / #2054 Codex-mode FRs | 236/238 | 1/2 | **False positive** — "sandbox bypass" in the FR body tripped the critical regex. An LLM reads that it's *proposing* a mode, not reporting a bypass. |
+| #61 bot "Code Audit" (P3) | 349 | 19 | **False positive** — a bot audit issue mentioning "security". LLM grader avoids. |
+| #2125 multi-host git creds (P2, FR) | 232 | 8 | **Lucky match** — the body literally says "your GitHub PAT is offered to the self-hosted remote", so the regex hits a credential-leak pattern and scores it critical. Right answer, wrong reason: it's an exact-phrase fluke, not comprehension. An LLM would grade it high because it *understands* the credential-crossing risk. |
 
-#2125 is the clearest case for the whole design: a regex/label view can't see
-it's important, so it needs either content-grading (LLM) or the manual-pin
-lever — which is why both are in the model.
+#2125 makes the point either way: the earlier draft's regex *missed* it (false
+negative); a one-word regex tweak now *over-*hits it. Both are the same lesson —
+regex can't reason about severity, so production must grade with the LLM.
 
 **Takeaways for the real build:**
 - The score *mechanics* order the queue far better than the priority label.
-- The severity *grader* must be the LLM, not regex — the dry-run's own false
-  positives are the proof.
+- The severity *grader* must be the LLM, not regex — the dry-run's false
+  positives *and* its lucky matches are both the proof.
 - Weights are defensible starting points; tune against this before→after table.
 
 ---
@@ -254,51 +335,88 @@ The bug template asks Version + OS but both optional → sparse. Add structured,
 Keep them optional (the pipeline already triages from description alone) but
 dropdowns cost the reporter nothing and sharpen severity × reach.
 
+### Sandbox / security deserves its own treatment
+
+You flagged sandboxing as its own category — the data agrees. Across open
+issues: **63 mention sandbox** (bwrap/seatbelt/egress), **70 policy/guardrail**,
+**120 credential/secret**. The top P0
+([#3557](https://github.com/omnigent-ai/omnigent/issues/3557)) is a
+shell-surface policy-gate *bypass*; #2125 is a credential-crossing risk. These
+aren't ordinary bugs — a sandbox escape or policy bypass is a **security
+severity**, not a functional one.
+
+Two concrete changes:
+
+- **Component:** `sandbox` and `policies` are already distinct areas in
+  `areas.json` (mapping to `comp:runner` / `comp:policies`). Keep them
+  first-class; don't fold them into the harness buckets.
+- **Severity:** the rubric's P0 row explicitly names "security/policy/sandbox
+  bypass," and the grader should treat *escape / bypass / credential-crossing*
+  as top-tier severity regardless of reach — a one-user sandbox escape is still
+  P0. This is the one place reach does **not** gate priority.
+
 ---
 
 ## Rollout
 
 1. **Prompt re-calibration** (`.github/triage/config.yaml`) — new priority
-   rubric + the "P1 scarcity" guardrail + emit a `severity` field. Low risk,
-   affects new issues immediately.
-2. **Template fields** — add Harness / Platform / Impact dropdowns.
-3. **Scoring job** — productionize `score_prototype.py` into a scheduled action
-   that reads the LLM-graded severity and publishes the ranked view.
-4. **One-time backfill** — re-run triage over the 128 open P1s to demote the
+   rubric (grade FRs across buckets; security/sandbox → P0) + the "P1 scarcity"
+   guardrail + emit `severity` and `readiness` fields. Low risk, affects new
+   issues immediately.
+2. **Harness tier labels** — add `comp:harness-t1/-t2/-t3`, map each harness
+   area in `areas.json` to a tier, backfill existing `comp:harnesses` issues.
+3. **Template fields** — add Harness / Platform / Impact dropdowns.
+4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
+   that reads LLM-graded severity + readiness + dup count and publishes the
+   ranked view.
+5. **One-time backfill** — re-run triage over the 128 open P1s to demote the
    mislabeled ones (target: P1 back under ~20% of open bugs).
-5. **Wire the latent funnels** — actually apply `good first issue`; revisit why
-   dedup fires so rarely.
+6. **Consume dedup output** — once [#4037](https://github.com/omnigent-ai/omnigent/pull/4037)
+   lands, feed duplicate count into `dup_reach`; wire the unused `good first
+   issue` funnel.
 
 ## Metrics
 
 - **P1 share of open bugs** — target < 20% (today 60%).
 - **Priority age separation** — P1 median age should drop well below P2's
   (today they're equal — the tell that priority is ignored).
-- **Score→action correlation** — are top-scored issues the ones getting closed?
-- **Manual-pin rate** — how often maintainers override the score (high = weights
-  need tuning).
+- **Prioritization efficiency** — of the k issues actually resolved in a period,
+  what fraction of the *achievable* score did we capture? Compute
+  `sum(score of the k resolved) / sum(score of the top-k by score)`. A ratio
+  near 1.0 means the team is working the highest-scored issues; a low ratio
+  means high-score issues are being skipped (either the score is wrong, or
+  attention is going elsewhere). This is the single best signal that the score
+  is *ordering real work*, not just producing a list.
+- **Re-grade rate** — how often maintainers change a severity/priority label
+  after triage (high = the classifier's grading needs tuning).
 
 ---
 
-## Appendix A — Should we split `comp:harnesses`?
+## Appendix A — Splitting `comp:harnesses`: tier labels vs per-harness labels
 
-**For:** it's 41% of open issues; `areas.json` already knows the sub-area;
-per-harness labels make the biggest bucket filterable and feed tier without
-title-keyword guessing.
+`comp:harnesses` is 41% of open issues and needs splitting. Two options:
 
-**Against:** the repo intentionally has *no label-sync* (`areas.json` notes
-`gh` can't add a nonexistent label), and 8 areas share `comp:harnesses` today.
-Splitting means ~11 new `harness:*` labels + a sync step + updating the
-classifier allowlist.
+- **Per-harness** (`comp:harness-claude`, `comp:harness-codex`, …) — one label
+  per harness (~11 today). Maximally granular, but every new harness needs a
+  new label, and re-tiering means re-teaching everyone which harnesses are
+  "important."
+- **Tier** (`comp:harness-t1/-t2/-t3`) — three stable labels; the harness→tier
+  mapping lives in `areas.json`. **Chosen.** Future-proof: shipping a harness or
+  re-tiering one is an `areas.json` edit + backfill, no new label. Per-harness
+  *filtering* is still possible through area routing when someone needs it.
 
-**Recommendation:** defer the label split; ship tier-as-multiplier first (gets
-most of the value with no new labels). Split only if maintainers want to *filter*
-by harness, not just *order* by it.
+Both need the same one-time backfill of existing `comp:harnesses` issues; tier
+adds three labels instead of eleven and doesn't grow with the harness count.
 
-## Appendix B — Rejected: keep priority as the only axis
+## Appendix B — Rejected alternatives
 
-Considered leaving priority as the single lever and just re-calibrating the
-rubric. Rejected because it can't express "high-severity P2" (#2125) — a bucket
-label can't encode within-bucket ordering, and maintainers demonstrably need to
-re-rank over time. The score exists precisely to order *within and across*
-buckets.
+- **Keep priority as the only axis.** Can't express a high-severity item stuck
+  in a low bucket (#2125), and a single bucket label can't encode ordering
+  within a bucket. The score exists to order within and across buckets.
+- **A separate `pin:high` / `pin:low` override** (in an earlier draft). Dropped:
+  it's a second knob that means the same thing as changing severity but sits out
+  of band from it. Maintainers re-grade severity to bump — one knob, the one
+  they already use.
+- **Auto-closing duplicates.** The dedup labeler
+  ([#4037](https://github.com/omnigent-ai/omnigent/pull/4037)) links without
+  closing; we keep dupes open and use their *count* as a reach signal (Axis 5).
