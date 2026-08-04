@@ -14,6 +14,8 @@ Usage:
     GH_HOST=github.com ghx api --paginate \
       "repos/omnigent-ai/omnigent/issues?state=all&per_page=100" > /tmp/all_issues_raw.json
     python3 designs/prioritization/score_prototype.py /tmp/all_issues_raw.json
+    # priority-LABEL backfill preview (current vs regraded bucket, no scores):
+    python3 designs/prioritization/score_prototype.py /tmp/all_issues_raw.json --regrade
 """
 
 from __future__ import annotations
@@ -221,12 +223,32 @@ def current_rank_key(i):
     return (p, -parse(i["created_at"]).timestamp())
 
 
-def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "/tmp/all_issues_raw.json"
-    with open(path) as f:
-        data = json.load(f)
-    opn = [i for i in data if i.get("pull_request") is None and i["state"] == "open"]
+def regrade(i):
+    """Map an issue to a priority BUCKET from severity × reach (Axis 2 rubric).
 
+    This is the backfill output — a priority *label*, not a score. Applies to
+    bugs and FRs alike; type does not cap priority. In production the LLM grades
+    severity/reach; here we reuse the regex severity()/reach() so the backfill
+    preview is reproducible (and carries the same known false positives).
+    """
+    sname, _ = severity(i)
+    r = reach(i)  # 1.5 broad · 1.0 normal · 0.9 single-platform
+    if sname == "critical":  # security/data-loss/all-users-down
+        return "P0-critical"
+    if sname == "high":  # high severity: broad reach -> P1, narrow -> P2
+        return "P1-high" if r >= 1.0 else "P2-medium"
+    if sname == "medium":  # medium only reaches P1 when reach is broad
+        return "P1-high" if r >= 1.5 else "P2-medium"
+    if sname == "low":
+        return "P3-low"
+    return "P2-medium" if r >= 1.0 else "P3-low"  # FR default: reach decides
+
+
+def current_prio(i):
+    return next((p for p in PRIOS if p in labels(i)), "none")
+
+
+def print_score_ranking(opn):
     before = sorted(opn, key=current_rank_key)
     after = sorted(opn, key=lambda i: score(i)[0], reverse=True)
     before_rank = {i["number"]: n for n, i in enumerate(before)}
@@ -235,12 +257,50 @@ def main():
     print(f"{'AFTER':>5} {'BEFORE':>6} {'Δ':>5}  {'score':>6} {'severity':9} {'prio':11} issue")
     for n, i in enumerate(after):
         sc, sn = score(i)
-        pr = next((p for p in PRIOS if p in labels(i)), "none")
+        pr = current_prio(i)
         b = before_rank[i["number"]]
         delta = b - n  # positive = moved UP vs current ordering
         arrow = f"+{delta}" if delta > 0 else str(delta)
         title = i["title"][:48]
         print(f"{n + 1:>5} {b + 1:>6} {arrow:>5}  {sc:6.0f} {sn:9} {pr:11} #{i['number']} {title}")
+
+
+def print_regrade(opn):
+    """Backfill preview: current priority LABEL vs regraded label (no scores)."""
+    import collections
+
+    cur = collections.Counter(current_prio(i) for i in opn)
+    new = collections.Counter(regrade(i) for i in opn)
+    print(f"# {len(opn)} open issues — priority LABEL regrade (backfill preview)\n")
+    print(f"{'priority':12} {'now':>5} {'regraded':>9}")
+    for p in (*PRIOS, "none"):
+        print(f"{p:12} {cur.get(p, 0):>5} {new.get(p, 0):>9}")
+
+    bugs = [i for i in opn if "Bug" in labels(i)]
+    p1_now = sum(current_prio(i) == "P1-high" for i in bugs)
+    p1_new = sum(regrade(i) == "P1-high" for i in bugs)
+    print(f"\nP1 share of open bugs: {p1_now}/{len(bugs)} -> {p1_new}/{len(bugs)}")
+
+    moves = collections.Counter(
+        f"{current_prio(i)} -> {regrade(i)}" for i in opn if current_prio(i) != regrade(i)
+    )
+    print("\nchanged labels (count):")
+    for k, v in moves.most_common():
+        print(f"  {v:>4}  {k}")
+
+
+def main():
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    path = args[0] if args else "/tmp/all_issues_raw.json"
+    with open(path) as f:
+        data = json.load(f)
+    opn = [i for i in data if i.get("pull_request") is None and i["state"] == "open"]
+
+    if "--regrade" in flags:
+        print_regrade(opn)  # priority-label backfill preview
+    else:
+        print_score_ranking(opn)  # composite-score before->after (default)
 
 
 if __name__ == "__main__":

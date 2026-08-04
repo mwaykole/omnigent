@@ -114,6 +114,58 @@ Calibration guardrail added to the prompt: **"P1 is a scarcity signal. If more
 than ~20% of open bugs are P1, you are over-grading. A bug affecting one harness
 on one platform with a workaround is P2, not P1."**
 
+#### How regrading works
+
+Regrading maps an issue to a priority *bucket* from `severity × reach` — a
+pure label change, independent of the score. It runs in two situations:
+
+1. **One-time backfill.** Re-run the classifier over the existing open issues
+   once, so the backlog reflects the new rubric on day one. This is a labels-only
+   pass — same tool-less classifier, same trusted label-application steps as
+   [Stage 2 triage](../issue-triage-proposal.md); nothing new to build.
+2. **Ongoing, on demand.** A maintainer who disagrees just changes the label
+   (P2 → P1, or the reverse). That *is* the bump mechanism — no separate pin
+   lever (see "Ongoing adjustment"). The scheduled re-score reads the updated
+   label the next time it runs.
+
+The mapping is mechanical once severity and reach are graded:
+
+| Graded severity | + reach | → priority |
+|---|---|---|
+| critical (security / data-loss / all-users-down) | any | **P0** |
+| high (crash / hang / no-workaround; FR: blocks common workflow) | broad / normal | **P1** |
+| high | single-platform | **P2** |
+| medium | broad | **P1** |
+| medium | normal / narrow | **P2** |
+| low / narrow FR | — | **P3** |
+
+**Backfill preview** (`score_prototype.py --regrade`, regex grader over the 360
+open issues — the production backfill uses the LLM grader):
+
+| Priority | Now | Regraded |
+|---|---|---|
+| P0-critical | 3 | 8 |
+| **P1-high** | **128** | **65** |
+| P2-medium | 203 | 273 |
+| P3-low | 15 | 14 |
+| (no priority) | 11 | 0 |
+
+**P1 share of open bugs: 60% → 25%** — the inflation drained, the P1/P2 binary
+un-collapsed. What moves, and why:
+
+| Change | Count | Example |
+|---|---|---|
+| P1 → P2 | 87 | #3980 desktop dialog paint-over — medium severity, single-platform (not "all users, no workaround") |
+| P2 → P1 | 24 | #3976 headless OAuth2 grant — high-severity FR, broad reach (was defaulted to P2) |
+| P2 → P3 | 10 | #3074 OS-native directory picker — narrow nice-to-have FR |
+| P3 → P2 | 12 | under-graded items pulled up |
+| P2 → P0 | 4 | #659 microvm sandbox backend — security-tier |
+
+*Caveat:* these per-issue moves use the regex grader, so they inherit its known
+false positives (e.g. #2057/#2054 "sandbox bypass" FRs wrongly reach P0). Read
+the **aggregate shape** (60% → 25%) as the reliable signal and individual rows
+as illustrative; the LLM backfill corrects the outliers.
+
 ### Axis 3 — Harness tier (new, derived)
 
 Harnesses are not equal in strategic weight. Tier is **derived from the
@@ -263,7 +315,9 @@ severity; fixing severity fixes the score.
 
 `designs/prioritization/score_prototype.py` reads a snapshot of all open issues
 and prints **current-priority ordering vs composite-score ordering**, with a
-rank delta per issue, so we tune weights against real test cases.
+rank delta per issue, so we tune weights against real test cases. (Pass
+`--regrade` for the priority-*label* backfill preview shown in Axis 2 instead of
+the score ranking.)
 
 **Is severity re-graded in these examples?** Yes — the dry-run ignores the
 existing priority label entirely and *re-grades severity from content* (regex
@@ -369,8 +423,10 @@ Two concrete changes:
 4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
    that reads LLM-graded severity + readiness + dup count and publishes the
    ranked view.
-5. **One-time backfill** — re-run triage over the 128 open P1s to demote the
-   mislabeled ones (target: P1 back under ~20% of open bugs).
+5. **One-time backfill (regrade)** — re-run the classifier over open issues to
+   relabel under the new rubric (see "How regrading works"); preview with
+   `score_prototype.py --regrade`. Target: P1 back under ~20% of open bugs
+   (regex preview lands it at 25%; the LLM pass should do better).
 6. **Consume dedup output** — once [#4037](https://github.com/omnigent-ai/omnigent/pull/4037)
    lands, feed duplicate count into `dup_reach`; wire the unused `good first
    issue` funnel.
