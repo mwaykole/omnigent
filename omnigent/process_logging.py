@@ -8,7 +8,7 @@ import os
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import BinaryIO, TextIO, TypedDict
 
@@ -174,7 +174,7 @@ def process_log_dir(destination: str, *, root: str | Path | None = None) -> Path
 
 
 def _timestamp() -> str:
-    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    return datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S-%f")
 
 
 def create_process_log_path(
