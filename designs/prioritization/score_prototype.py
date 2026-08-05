@@ -23,6 +23,7 @@ from __future__ import annotations
 import datetime
 import json
 import math
+import os
 import re
 import sys
 
@@ -102,9 +103,37 @@ SEVERITY = {
     ),
 }
 
-TIER1 = ["claude", "codex"]
-TIER2 = ["cursor", "antigravity", "copilot", "gemini", "openai"]
 PRIOS = ("P0-critical", "P1-high", "P2-medium", "P3-low")
+
+# Component importance is one unified axis: a per-area `weight` read from
+# .github/areas.json (bands 1.4/1.1/1.0/0.9), applied to EVERY comp: label —
+# not the old harness-only tier. Harness weights are telemetry-seeded (session
+# usage); non-harness are editorial. See areas.json `weight` / `weight_source`.
+_AREAS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".github", "areas.json")
+
+
+def _load_area_weights():
+    """Return (label_weight, harness_area_weights):
+    - label_weight[comp:label] = max weight among areas sharing that label
+      (the fallback when we can't pin the exact sub-area).
+    - harness_area_weights = [(keyword, weight)] for harness-* areas, so a
+      harness issue resolves to its specific harness by a title keyword."""
+    try:
+        with open(_AREAS_PATH) as f:
+            areas = json.load(f)["areas"]
+    except (OSError, KeyError):
+        return {}, []
+    label_weight = {}
+    harness = []
+    for a in areas:
+        w = a.get("weight", 1.0)
+        label_weight[a["label"]] = max(label_weight.get(a["label"], 0.0), w)
+        if a["key"].startswith("harness-"):
+            harness.append((a["key"][len("harness-") :], w))
+    return label_weight, harness
+
+
+_LABEL_WEIGHT, _HARNESS_WEIGHTS = _load_area_weights()
 
 
 def labels(i):
@@ -143,15 +172,26 @@ def reach(i):
     return 1.0
 
 
-def tier_mult(i):
-    if "comp:harnesses" not in labels(i):
+def area_weight(i):
+    """Unified component-importance multiplier from areas.json `weight`.
+
+    Applies to every comp: label (not harness-only). For a harness issue we
+    resolve the specific harness by a title keyword → that harness area's
+    weight; otherwise we use the max weight among areas sharing the comp: label.
+    No comp: label → 1.0 (neutral)."""
+    labs = labels(i)
+    comps = [x for x in labs if x.startswith("comp:")]
+    if not comps:
         return 1.0
-    t = i["title"].lower()
-    if any(k in t for k in TIER1):
-        return 1.4
-    if any(k in t for k in TIER2):
-        return 1.1
-    return 0.9
+    if "comp:harnesses" in comps:
+        t = i["title"].lower()
+        for keyword, w in _HARNESS_WEIGHTS:
+            if keyword in t:
+                return w
+        # harness issue we can't pin to a specific harness: shared-infra weight
+        # (inner/llms/tools) is captured by the label max below.
+    # Most-important area wins among the issue's comp labels.
+    return max((_LABEL_WEIGHT.get(c, 1.0) for c in comps), default=1.0)
 
 
 # Demand handling is type-dependent, grounded in the reaction distribution:
@@ -218,7 +258,7 @@ def age_factor(i):
 
 def score(i):
     sname, sw = severity(i)
-    s = sw * reach(i) * tier_mult(i) * dup_reach(i) * readiness(i)
+    s = sw * reach(i) * area_weight(i) * dup_reach(i) * readiness(i)
     d = _demand_signal(i)
     if "enhancement" in labels(i):
         s *= 1.0 + FR_DEMAND_MAX * d  # demand LEADS for feature requests

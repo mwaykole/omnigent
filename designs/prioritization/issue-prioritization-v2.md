@@ -95,7 +95,7 @@ demand is at most a tiebreak**, or the queue will look empty of signal.
 are distinct and it's worth being precise:
 
 1. **Severity** — a graded property of the issue, a function of the axes below
-   (type, blast radius, harness tier, …). Scored `low / medium / high /
+   (type, blast radius, component weight, …). Scored `low / medium / high /
    critical = 10 / 30 / 60 / 100`.
 2. **Score** — severity combined with the mechanical multipliers (reach, tier,
    readiness, dup, demand). This is the **continuous ordering** — it sorts
@@ -118,11 +118,12 @@ lets an issue cross **up** a band:
 | **≥ 25** | **P2-medium** | ordinary graded work |
 | **< 25** | **P3-low** | minor / narrow |
 
-Example: a "high" bug (severity 60) in a tier-1 harness scores 60 × 1.4 = 84 →
-clears **P1**; the same bug on a niche harness scores 60 × 0.9 = 54 → stays
-**P2**. The multiplier moved the label. (Thresholds are tunable constants —
-`P0_MIN`/`P1_MIN`/`P2_MIN` in `score_prototype.py`; the current values give P0 9
-/ P1 58 / P2 206 / P3 87 on the snapshot, a 22% P1-bug share.)
+Example: a "high" bug (severity 60) in a weight-1.4 area scores 60 × 1.4 = 84 →
+clears **P1**; the same bug in a weight-0.9 area scores 60 × 0.9 = 54 → stays
+**P2**. The component weight moved the label. (Thresholds are tunable constants —
+`P0_MIN`/`P1_MIN`/`P2_MIN` in `score_prototype.py`; with the unified component
+weight the snapshot gives P0 15 / P1 68 / P2 208 / P3 69, a 27% P1-bug share —
+see the note under the backfill preview.)
 
 *One consequence worth naming:* because the label comes from the full score,
 non-severity signals **can** tip it — a heavily-reacted FR or a much-duplicated
@@ -212,58 +213,78 @@ open issues — the production backfill uses the LLM grader):
 
 | Priority | Now | Regraded |
 |---|---|---|
-| P0-critical | 3 | 9 |
-| **P1-high** | **128** | **58** |
-| P2-medium | 203 | 206 |
-| P3-low | 15 | 87 |
+| P0-critical | 3 | 15 |
+| **P1-high** | **128** | **68** |
+| P2-medium | 203 | 208 |
+| P3-low | 15 | 69 |
 | (no priority) | 11 | 0 |
 
-**P1 share of open bugs: 60% → 22%** — the inflation drained, and P3 fills out
+**P1 share of open bugs: 60% → 27%** — the inflation drained and P3 fills out
 (score-thresholding sends genuinely-minor items to P3, where the old label
-distribution left it vestigial). What moves, and why:
+distribution left it vestigial). Note 27% sits a bit above the ~20% target: the
+unified component weight lifts core-area (`comp:server`/`comp:runner`, 1.1) bugs
+that were flat 1.0 before, which is the intended effect — if we want a stricter
+P1, the lever is the tunable `P1_MIN` threshold, not re-flattening the weights.
+What moves, and why:
 
 | Change | Count | Example |
 |---|---|---|
-| P1 → P2 | 85 | #3981 desktop rail resize — medium severity, single-platform (score 33) |
-| P2 → P3 | 68 | #4027 "delete button on web UI" — narrow FR (score 22, below the P2 cut) |
-| P2 → P1 | 23 | #3976 headless OAuth2 grant — high-severity FR, broad reach (score 99) |
-| P1 → P3 | 9 | #3980 desktop dialog paint-over — minor, single-platform (score 25) |
-| P2 → P0 | 4 | #2125 multi-host git creds — credential-crossing (score 104) |
+| P1 → P2 | 80 | #3981 desktop rail resize — medium severity, single-platform (score 33) |
+| P2 → P3 | 55 | #4027 "delete button on web UI" — narrow FR (score 22, below the P2 cut) |
+| P2 → P1 | 25 | #3976 headless OAuth2 grant — high-severity FR, broad reach |
+| P2 → P0 | 10 | #2125 multi-host git creds — credential-crossing, weight-1.4 area (score 161) |
+| P1 → P3 | 6 | #3980 desktop dialog paint-over — minor, single-platform (score 25) |
 
 *Caveat:* these per-issue moves use the regex grader, so they inherit its known
 false positives (e.g. #2057/#2054 "sandbox bypass" FRs wrongly reach P0). Read
-the **aggregate shape** (60% → 22%) as the reliable signal and individual rows
+the **aggregate shape** (60% → 27%) as the reliable signal and individual rows
 as illustrative; the LLM backfill corrects the outliers.
 
-### Axis 3 — Harness tier (new, derived)
+### Axis 3 — Component weight (unified; was harness-only)
 
-Harnesses are not equal in strategic weight. Tier is **derived from the
-existing `areas.json` harness areas** (no new hand-labeling). The assignment is
-informed by activity (open issues · reactions), not a guess:
+Not all subsystems are equally important, and importance shouldn't be a
+harness-only concept. An earlier draft had a *harness tier* multiplier that gave
+`comp:harnesses` a 1.4/1.1/0.9 boost and left **every other component at a flat
+1.0** — so a bug in `comp:server` couldn't be weighted above one in `comp:repr`.
+This axis unifies that: **one `weight` per area in `areas.json`, applied to every
+`comp:` label**, harness or not. Harness tier is now just the harness slice of it.
 
-- **Tier 1** — `claude` (128 open / 26 👍), `codex` (95 / 16). Flagship.
-- **Tier 2** — `pi` (41 / 15), `cursor` (37 / 15), `antigravity` (24 / 13),
-  `copilot` (15 / 13), `openai`/`gemini`. **Pi moved up to T2 on the data**
-  (per review: it's the 3rd-most-active harness, above cursor — a T3 default
-  under-weighted it). `opencode` (19 / 3) is the marginal T2/T3 call.
-- **Tier 3** — the low-activity, near-zero-reaction rest: `goose`, `hermes`,
-  `kimi`, `kiro`, `qwen` (each ~10–16 open, 0 👍).
+**One field, two sources.** Each area in `areas.json` carries a `weight` (bands
+**1.4 / 1.1 / 1.0 / 0.9**) and a `weight_source`:
 
-Tier is a maintainer call, not a formula — the counts inform it, and the
-mapping lives in `areas.json` so re-tiering (e.g. finalizing opencode) is a
-one-line edit. Open follow-up flagged in review: confirm the T2 cut in the team
-channel.
+- **Harness weights are telemetry-seeded** (`weight_source: telemetry`) from real
+  usage — the Databricks dashboard's *LJ Sessions by Harness* (sessions + users,
+  last week), aggregating each harness's SDK + native variants. This is a better
+  signal than GitHub issue counts: it measures what people actually run.
+  - **1.4** — `claude`, `codex` (dominant on both users and sessions).
+  - **1.1** — `pi` (clear 3rd), `opencode`, `cursor`, `antigravity`, `hermes`,
+    `copilot`. (Telemetry lifts **hermes** here — GitHub reactions had it near
+    zero, but real session usage puts it mid-pack: a concrete case of usage
+    correcting issue-count.)
+  - **0.9** — `goose`, `kimi`, `kiro`, `qwen` (near-zero usage).
+- **Non-harness weights are editorial** (`weight_source: editorial`) — there is
+  **no per-component usage telemetry** (every session hits the server, so
+  "server usage" isn't a distinguishing signal), so maintainers set these by
+  judgment, honestly labeled as such:
+  - **1.1** — `comp:server`, `comp:runner` core areas (server/host/db,
+    runner/runtime/sandbox) and the shared harness-infra (`inner`/`llms`/`tools`):
+    the execution path a failure blocks everything.
+  - **1.0** — `comp:web-ui`, `comp:policies`, `comp:tui` mainline.
+  - **0.9** — `comp:repr` (spec/stores/entities), `comp:infra`, and low-traffic
+    surfaces (repl).
 
-Tier is a **score multiplier**, and we split the `comp:harnesses` mega-bucket
-(41% of open) with **tier labels — `comp:harness-t1` / `-t2` / `-t3`** — rather
-than per-harness labels (`comp:harness-claude`, …). Tier labels are more
-future-proof: adding a harness or re-tiering one edits `areas.json` (which
-already maps each harness area) and re-runs a backfill, without inventing a new
-label each time a harness ships. The mapping (area → tier) lives in
-`areas.json`, so the tier label and the score multiplier share one source of
-truth. Per-harness *filtering* is still available via the area routing if a
-maintainer wants it, without a label per harness. (Alternative considered and
-rejected in Appendix A.)
+The score reads `weight` for the issue's area (harness issues resolve to the
+specific harness; otherwise the most-important area among the issue's `comp:`
+labels wins). Because it's one `areas.json` field shared with triage + reviewer
+routing, re-weighting is a one-line edit and telemetry can refresh the harness
+bands on a schedule.
+
+**Labels.** The harness view of this weight is still the tier label set
+`comp:harness-t1/-t2/-t3` (future-proof: a new/re-tiered harness is an
+`areas.json` edit, not a new label). Non-harness areas carry their weight in
+`areas.json` without a per-band label — the weight drives the score directly.
+Open follow-up flagged in review: confirm the harness band cut (Pi/opencode) and
+the editorial non-harness weights in the team channel.
 
 ### Component taxonomy — which `comp:` labels to add
 
@@ -310,7 +331,7 @@ valve that lets us be granular without unbounded label growth.
 ```
 base  = severity_weight              # LLM-graded from content (P0/P1/P2/P3-ish, 0–100)
       × reach_multiplier             # all-users/default 1.5 · normal 1.0 · single-platform 0.9
-      × harness_tier_multiplier      # T1 1.4 · T2 1.1 · T3 0.9 · non-harness 1.0
+      × component_weight             # areas.json per-area weight 1.4/1.1/1.0/0.9 (Axis 3)
       × dup_reach                    # +15% per confirmed duplicate, capped +50% (Axis 5)
       × readiness                    # ready-to-work 1.1 · normal 1.0 · needs-info 0.85 (Axis 6)
 
@@ -340,17 +361,18 @@ with linux_bwrap dies at spawn"):
 |---|---|---|
 | severity | 60 (high) | spawn death — a hard failure, no workaround |
 | × reach | × 1.5 | body says it hits every session on the config → broad |
-| × harness_tier | × 1.4 | title says `claude-sdk` → tier-1 |
+| × component_weight | × 1.4 | title says `claude-sdk` → `harness-claude` area, weight 1.4 (Axis 3) |
 | × dup_reach | × 1.0 | no confirmed duplicates (yet) |
 | × readiness | × 1.0 | no explicit repro section matched → no bump |
 | = base | **126** | 60 × 1.5 × 1.4 |
 | × demand (bug) | + 0 | 0 reactions; bugs get only the additive tiebreak |
 | × age | × 1.0 | neutral by default — age never lowers the score |
-| **= score** | **126** | **≥ 100 → P0-critical**; ranks **#3** of 360 (was P1, rank #37) |
+| **= score** | **126** | **≥ 100 → P0-critical**; ranks **#6** of 360 (was P1, rank #37) |
 
-Contrast a vague, low-tier ticket: severity 30 (medium) × reach 0.9
-(single-platform) × tier 0.9 (tier-3 harness) × readiness 1.0 ≈ **24** → **P3**
-(below the 25 cut) — an order of magnitude lower, so it sits deep in the queue.
+Contrast a vague, low-weight ticket: severity 30 (medium) × reach 0.9
+(single-platform) × component_weight 0.9 (e.g. `comp:repr`, or a niche harness)
+× readiness 1.0 ≈ **24** → **P3** (below the 25 cut) — an order of magnitude
+lower, so it sits deep in the queue.
 Same five data points, opposite ends of the queue *and* opposite priority
 labels: that's the score→label derivation doing the work.
 
@@ -627,11 +649,13 @@ each intended as its own follow-up PR (tracked as separate issues).
    rubric (grade FRs across buckets; explicit P0 list; tier-1 floor) + the "P1
    scarcity" guardrail + emit `severity`, `readiness`, and `sub_area` fields.
    Low risk, affects new issues immediately.
-2. **Component labels** — add `comp:harness-t1/-t2/-t3` (map each harness area in
-   `areas.json` to a tier; confirm the T2 cut incl. Pi/opencode in the team
-   channel), plus `comp:sandbox`, `comp:mobile`, `comp:auth`; add the `sub_area`
-   taxonomy for finer routing (SDK/native, UI surface, runner phase, device).
-   Update the classifier allowlist and backfill. See "Component taxonomy."
+2. **Component weight + labels** — the per-area `weight`/`weight_source` fields
+   are already in `areas.json` (harness = telemetry, non-harness = editorial;
+   confirm the harness bands and editorial weights in the team channel). Add the
+   `comp:harness-t1/-t2/-t3` labels (the harness view of the weight), plus
+   `comp:sandbox`, `comp:mobile`, `comp:auth`; add the `sub_area` taxonomy for
+   finer routing (SDK/native, UI surface, runner phase, device). Update the
+   classifier allowlist and backfill. See "Component taxonomy" and Axis 3.
 3. **Template fields** — add Harness (+SDK/native) / Platform-device / Impact /
    Auth-type dropdowns.
 4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
@@ -642,7 +666,8 @@ each intended as its own follow-up PR (tracked as separate issues).
    relabel under the new rubric (see "How regrading works"); preview with
    `score_prototype.py --regrade`. Sets priority only where none exists or the
    bot set the prior value — never over a human edit. Target: P1 back under ~20%
-   of open bugs (regex preview lands it at 22%; the LLM pass should do better).
+   of open bugs (regex preview lands it at 27% with the unified component weight;
+   tune `P1_MIN` and the LLM grader to tighten).
 6. **Consume dedup output** — once [#4037](https://github.com/omnigent-ai/omnigent/pull/4037)
    lands, feed duplicate count into `dup_reach`; wire the unused `good first
    issue` funnel.
@@ -705,217 +730,219 @@ up). The Now→Derived column is the per-issue view of the backfill: the ⚑ row
 are the relabels the one-time regrade would apply.
 
 **Illustrative, not actionable.** This is the *mechanism* running on a
-deliberately-weak grader, so its own failures are visible on purpose: ranks 1–2
+deliberately-weak grader, so its own failures are visible on purpose: ranks 2–3
 (#2057/#2054) are FRs that merely *mention* "sandbox bypass" and are graded
-critical — they sit above the real P0 (#3557, rank 6), so **the very top is
-backwards**; #61 (rank 9) is a *bot* audit issue riding a "security" keyword.
+critical — they sit above the real P0 (#3557, rank 10), so **the very top is
+backwards**; #61 (rank 15) is a *bot* audit issue riding a "security" keyword.
 That's the doc's thesis made concrete: regex can't grade severity. The scaffold
-is sound — strip those artifacts and the genuine tier-1 bugs (#3265, #3557,
-#3270, #3180, #2373) cluster correctly in the top 16. Scores also *tie* in coarse
-bands (many issues share 92/84/…), so within-band order is arbitrary — read this
-as a handful of tiers, not 200 true ranks. Age is now neutral (review point), so
-older issues no longer decay. With the LLM grader plus ≤10% hand-correction (see
-the maintainer guide), this is the shape the production ranking takes.
+is sound — strip those artifacts and the genuine high-weight harness bugs
+(#3265, #3557, #3270, #3180, #2373) cluster correctly near the top. Scores also
+*tie* in coarse bands (many issues share 92/84/…), so within-band order is
+arbitrary — read this as a handful of tiers, not 200 true ranks. Age is neutral
+(review point) and component weight is now unified across all `comp:` (Axis 3),
+so core-area bugs rank above niche ones by the same field harnesses use. With the
+LLM grader plus ≤10% hand-correction (see the maintainer guide), this is the
+shape the production ranking takes.
 
 | # | Score | Sev | Now | Derived | Δrank | Issue |
 |--:|--:|---|---|---|--:|---|
-| 1 | 154 | critical | P2 | P0 ⚑ | +235 | [#2057](https://github.com/omnigent-ai/omnigent/issues/2057) [Feature] Add Codex Auto mode using auto_review instead of jumping to  |
-| 2 | 154 | critical | P2 | P0 ⚑ | +236 | [#2054](https://github.com/omnigent-ai/omnigent/issues/2054) [Feature] Remove duplicate Codex Full access mode and keep Sandbox Byp |
-| 3 | 126 | high | P1 | P0 ⚑ | +34 | [#3265](https://github.com/omnigent-ai/omnigent/issues/3265) claude-sdk agent with linux_bwrap dies at spawn on a runtime bwrap bin |
-| 4 | 115 | high | P2 | P0 ⚑ | +236 | [#2038](https://github.com/omnigent-ai/omnigent/issues/2038) [Feature] No way to deregister/delete an external self-registered host |
-| 5 | 110 | critical | P1 | P0 ⚑ | -1 | [#3983](https://github.com/omnigent-ai/omnigent/issues/3983) [Bug] Smart-routed turns render out of order: reply streams above the  |
-| 6 | 110 | critical | P0 | P0 | -5 | [#3557](https://github.com/omnigent-ai/omnigent/issues/3557) [Bug] Shell-surface policy gates are bypassed by option-taking command |
-| 7 | 110 | critical | P1 | P0 ⚑ | +28 | [#3270](https://github.com/omnigent-ai/omnigent/issues/3270) [Bug] sys_session_create children are absent from both sys_session_lis |
-| 8 | 104 | critical | P2 | P0 ⚑ | +224 | [#2125](https://github.com/omnigent-ai/omnigent/issues/2125) [Feature] Multi-host git credentials for managed sandboxes (GitHub + s |
-| 9 | 100 | critical | P3 | P0 ⚑ | +340 | [#61](https://github.com/omnigent-ai/omnigent/issues/61) 🤖 Code Audit: 21 potential issue(s) found |
-| 10 | 99 | high | P2 | P1 ⚑ | +126 | [#3976](https://github.com/omnigent-ai/omnigent/issues/3976) [Feature] OAuth2 client-credentials grant so a headless process can au |
-| 11 | 99 | high | P2 | P1 ⚑ | +153 | [#3363](https://github.com/omnigent-ai/omnigent/issues/3363) [Feature] Per-project custom instructions (project-scoped context) |
-| 12 | 99 | high | P2 | P1 ⚑ | +165 | [#3164](https://github.com/omnigent-ai/omnigent/issues/3164) [Feature] Optional runtimeClassName on the kubernetes sandbox provider |
-| 13 | 99 | high | P2 | P1 ⚑ | +263 | [#1388](https://github.com/omnigent-ai/omnigent/issues/1388) Make agents a first-class CRUD entity with a dedicated sidebar UI (dec |
-| 14 | 99 | critical | P2 | P1 ⚑ | +301 | [#659](https://github.com/omnigent-ai/omnigent/issues/659) [Feature] add a microvm backend for sandbox |
-| 15 | 92 | high | P1 | P1 | +26 | [#3180](https://github.com/omnigent-ai/omnigent/issues/3180) codex-native: runner never exits on idle timeout — cancelled delta-coa |
-| 16 | 92 | high | P1 | P1 | +66 | [#2373](https://github.com/omnigent-ai/omnigent/issues/2373) [Bug] claude-native: pasted web-UI message loses its Enter, stuck draf |
-| 17 | 92 | high | P1 | P1 | +77 | [#2060](https://github.com/omnigent-ai/omnigent/issues/2060) [Bug] claude-native: first web-UI message silently dropped when Claude |
-| 18 | 92 | high | P1 | P1 | +85 | [#1898](https://github.com/omnigent-ai/omnigent/issues/1898) [Bug] codex-native: cancelling a task awaiting flush() poisons the del |
-| 19 | 92 | high | P2 | P1 ⚑ | +297 | [#654](https://github.com/omnigent-ai/omnigent/issues/654) [Bug] Streaming with codex is hanging and paragraphs are not split. |
-| 20 | 92 | high | P1 | P1 | +107 | [#542](https://github.com/omnigent-ai/omnigent/issues/542) [Bug] AttributeError: 'SubprocessCLITransport' object has no attribute |
-| 21 | 90 | high | P1 | P1 | +31 | [#3001](https://github.com/omnigent-ai/omnigent/issues/3001) [Performance] GET /v1/sessions pre-fetches every accessible conversati |
-| 22 | 89 | high | P2 | P1 ⚑ | +273 | [#1051](https://github.com/omnigent-ai/omnigent/issues/1051) [Feature] Forward OTel exporter knobs to executor subprocess env |
-| 23 | 84 | high | P2 | P1 ⚑ | +131 | [#3558](https://github.com/omnigent-ai/omnigent/issues/3558) claude-sdk: cached client does not rebuild on framework-instruction ch |
-| 24 | 84 | high | P1 | P1 | +29 | [#3000](https://github.com/omnigent-ai/omnigent/issues/3000) claude-native transcript forwarder polls at 4 Hz per session with no i |
-| 25 | 84 | high | P1 | P1 | +37 | [#2748](https://github.com/omnigent-ai/omnigent/issues/2748) Runner idle-shutdown deadlocks forever: codex-forwarder close()/flush( |
-| 26 | 84 | high | P1 | P1 | +41 | [#2575](https://github.com/omnigent-ai/omnigent/issues/2575) pi-native: non-Claude Databricks models (GLM, Gemini, …) hang — provid |
-| 27 | 84 | high | P1 | P1 | +45 | [#2454](https://github.com/omnigent-ai/omnigent/issues/2454) [Bug] Unbounded ~/.omnigent growth: per-session native-harness dirs ar |
-| 28 | 84 | high | P1 | P1 | +52 | [#2421](https://github.com/omnigent-ai/omnigent/issues/2421) [Bug] codex app-server + MCP bridge children leak on ANY unclean runne |
-| 29 | 83 | high | P2 | P1 ⚑ | +276 | [#888](https://github.com/omnigent-ai/omnigent/issues/888) [Feature] Side-by-side multi-session view |
-| 30 | 81 | high | P2 | P1 ⚑ | +107 | [#3970](https://github.com/omnigent-ai/omnigent/issues/3970) pi-native: every turn fails with "Pi model error: 401 Invalid Token" w |
-| 31 | 78 | high | P2 | P1 ⚑ | +303 | [#16](https://github.com/omnigent-ai/omnigent/issues/16) Is native Windows support in scope, or should docs recommend WSL2? |
-| 32 | 76 | high | P2 | P1 ⚑ | +297 | [#151](https://github.com/omnigent-ai/omnigent/issues/151) Native claude_code worker hangs on the one-time Bypass Permissions acc |
-| 33 | 70 | high | P1 | P1 | +5 | [#3261](https://github.com/omnigent-ai/omnigent/issues/3261) [Crash] AttributeError: module 'os' has no attribute 'WNOHANG' |
-| 34 | 66 | high | P2 | P1 ⚑ | +112 | [#3750](https://github.com/omnigent-ai/omnigent/issues/3750) [Crash] PermissionError: [Errno 1] Operation not permitted |
-| 35 | 66 | high | P1 | P1 | -7 | [#3482](https://github.com/omnigent-ai/omnigent/issues/3482) [Crash] ServerError: |
-| 36 | 66 | high | P1 | P1 | -6 | [#3458](https://github.com/omnigent-ai/omnigent/issues/3458) session-updates stream crashes with KeyError when a client watches a c |
-| 37 | 66 | high | P1 | P1 | -5 | [#3359](https://github.com/omnigent-ai/omnigent/issues/3359) [Crash] ModuleNotFoundError: No module named 'termios' |
-| 38 | 66 | high | P2 | P1 ⚑ | +129 | [#3271](https://github.com/omnigent-ai/omnigent/issues/3271) [Feature] Expose per-session context size + last-turn timestamp to age |
-| 39 | 66 | high | P1 | P1 | 0 | [#3251](https://github.com/omnigent-ai/omnigent/issues/3251) [Crash] ModuleNotFoundError: No module named 'termios' |
-| 40 | 66 | high | P2 | P1 ⚑ | +133 | [#3231](https://github.com/omnigent-ai/omnigent/issues/3231) [Crash] OmnigentError: {'error_code': 403, 'message': 'Invalid access  |
-| 41 | 66 | high | P1 | P1 | +4 | [#3052](https://github.com/omnigent-ai/omnigent/issues/3052) [Crash] ModuleNotFoundError: No module named 'termios' |
-| 42 | 66 | high | P1 | P1 | +4 | [#3023](https://github.com/omnigent-ai/omnigent/issues/3023) [Crash] ModuleNotFoundError: No module named 'termios' |
-| 43 | 66 | high | P1 | P1 | +11 | [#2993](https://github.com/omnigent-ai/omnigent/issues/2993) [Crash] ModuleNotFoundError: No module named 'termios' |
-| 44 | 66 | high | P3 | P1 ⚑ | +293 | [#2887](https://github.com/omnigent-ai/omnigent/issues/2887) [Bug] web/package-lock.json is out of sync with package.json; plain `n |
-| 45 | 66 | high | P1 | P1 | +23 | [#2559](https://github.com/omnigent-ai/omnigent/issues/2559) Conversation bricked: Page fails to load when opening markdown file af |
-| 46 | 66 | high | P0 | P1 ⚑ | -44 | [#2355](https://github.com/omnigent-ai/omnigent/issues/2355) [Bug] workspace_id PK-widening migration crashes on populated Postgres |
-| 47 | 66 | high | P3 | P1 ⚑ | +294 | [#2224](https://github.com/omnigent-ai/omnigent/issues/2224) [Bug] get_client model-change check fails for harness="any" |
-| 48 | 66 | high | P1 | P1 | +50 | [#1985](https://github.com/omnigent-ai/omnigent/issues/1985) Headless `omnigent run -p` intermittently hangs forever despite the tu |
-| 49 | 66 | high | P2 | P1 ⚑ | +195 | [#1907](https://github.com/omnigent-ai/omnigent/issues/1907) Sub-agent model_override triggers an unnecessary first-turn harness re |
-| 50 | 66 | high | P1 | P1 | +54 | [#1888](https://github.com/omnigent-ai/omnigent/issues/1888) ansi-to-react default import resolves to the CJS exports object under  |
-| 51 | 66 | high | P2 | P1 ⚑ | +202 | [#1804](https://github.com/omnigent-ai/omnigent/issues/1804) spec parser crashes with TypeError on a null tools.builtins key (and s |
-| 52 | 66 | high | P2 | P1 ⚑ | +237 | [#1076](https://github.com/omnigent-ai/omnigent/issues/1076) Runner-layer Tier-2 escalation: release an unresponsive per-conversati |
-| 53 | 66 | high | P1 | P1 | +68 | [#1026](https://github.com/omnigent-ai/omnigent/issues/1026) Runner orphans tool callbacks with "no active turn context" after mid- |
-| 54 | 65 | high | P2 | P1 ⚑ | +154 | [#2714](https://github.com/omnigent-ai/omnigent/issues/2714) Upgrade openai-agents and remove the temporary openai<2.45 cap |
-| 55 | 65 | high | P1 | P1 | +35 | [#2245](https://github.com/omnigent-ai/omnigent/issues/2245) [Bug] openai-agents harness turn wedges permanently after policy-verdi |
-| 56 | 63 | high | P1 | P1 | +75 | [#108](https://github.com/omnigent-ai/omnigent/issues/108) Cannot install on Linux aarch64 — cel-expr-python has no aarch64 wheel |
-| 57 | 61 | medium | P2 | P1 ⚑ | +211 | [#1596](https://github.com/omnigent-ai/omnigent/issues/1596) Native-CLI harness (claude-native/codex-native) as a named agent's own |
-| 58 | 60 | high | P1 | P1 | -50 | [#3971](https://github.com/omnigent-ai/omnigent/issues/3971) Host runners inherit the daemon's cwd; a deleted launch dir breaks eve |
-| 59 | 60 | high | P1 | P1 | -25 | [#3274](https://github.com/omnigent-ai/omnigent/issues/3274) Sub-agent terminal status rejected with missing_parent_inbox and retri |
-| 60 | 60 | high | P2 | P1 ⚑ | +112 | [#3235](https://github.com/omnigent-ai/omnigent/issues/3235) Flaky E2E UI: test_scheduled_task_create_edit_modal_and_time_picker[ch |
-| 61 | 60 | high | P1 | P1 | -14 | [#3016](https://github.com/omnigent-ai/omnigent/issues/3016) [Bug] A transient session-snapshot failure permanently pins a session  |
-| 62 | 60 | high | P1 | P1 | -14 | [#3012](https://github.com/omnigent-ai/omnigent/issues/3012) Hosts authenticated via `omnigent login` permanently 403 on first reco |
-| 63 | 60 | high | P2 | P1 ⚑ | +155 | [#2428](https://github.com/omnigent-ai/omnigent/issues/2428) sys_session_send to a completed session hangs to ReadTimeout and is si |
-| 64 | 60 | high | P1 | P1 | +27 | [#2241](https://github.com/omnigent-ai/omnigent/issues/2241) Flaky on main: test_interrupt_forwards_to_harness_before_cancelling ti |
-| 65 | 60 | high | P1 | P1 | +31 | [#2051](https://github.com/omnigent-ai/omnigent/issues/2051) [Bug] sys_session_send(session_id=…) completions never drain to sys_re |
-| 66 | 60 | high | P0 | P1 ⚑ | -63 | [#1657](https://github.com/omnigent-ai/omnigent/issues/1657) hermes-native forwarder advances last_id per item, dropping a row's la |
-| 67 | 60 | high | P2 | P1 ⚑ | +247 | [#678](https://github.com/omnigent-ai/omnigent/issues/678) e2e: sub-agent supervisor routing / named-sub-agent auto-wake flakes ( |
-| 68 | 59 | high | P1 | P2 ⚑ | -51 | [#3799](https://github.com/omnigent-ai/omnigent/issues/3799) Android shell cannot sign in to servers behind a front-door auth proxy |
-| 69 | 59 | high | P1 | P2 ⚑ | -49 | [#3730](https://github.com/omnigent-ai/omnigent/issues/3730) [Bug] Android: renderer death terminates the app — OmnigentWebViewClie |
-| 70 | 59 | high | P1 | P2 ⚑ | -48 | [#3701](https://github.com/omnigent-ai/omnigent/issues/3701) [Bug] Desktop app never completes Okta security key / biometric MFA du |
-| 71 | 59 | high | P1 | P2 ⚑ | -38 | [#3299](https://github.com/omnigent-ai/omnigent/issues/3299) [Bug] Harness-credential route times out with a misleading 504 against |
-| 72 | 59 | high | P2 | P2 | +94 | [#3284](https://github.com/omnigent-ai/omnigent/issues/3284) [Crash] DuplicateOptionError: While reading from PosixPath('/Users/*** |
-| 73 | 59 | high | P2 | P2 | +111 | [#3070](https://github.com/omnigent-ai/omnigent/issues/3070) No progress signal on a stuck or interactive harness install |
-| 74 | 59 | high | P1 | P2 ⚑ | -19 | [#2967](https://github.com/omnigent-ai/omnigent/issues/2967) [Bug] A full context window bricks a session with "Prompt is too long" |
-| 75 | 59 | high | P2 | P2 | +141 | [#2480](https://github.com/omnigent-ai/omnigent/issues/2480) [Bug] Postgres-backed local server: bare `No module named 'psycopg'` + |
-| 76 | 59 | high | P1 | P2 ⚑ | +12 | [#2270](https://github.com/omnigent-ai/omnigent/issues/2270) Windows: config list crashes — UnicodeEncodeError on cp1252 (non-UTF8) |
-| 77 | 59 | high | P1 | P2 ⚑ | +12 | [#2269](https://github.com/omnigent-ai/omnigent/issues/2269) Windows: omnigent setup crashes — ModuleNotFoundError: No module named |
-| 78 | 59 | high | P1 | P2 ⚑ | +21 | [#1953](https://github.com/omnigent-ai/omnigent/issues/1953) `omni host` dies permanently when the OIDC session JWT expires — no re |
-| 79 | 59 | high | P1 | P2 ⚑ | +23 | [#1901](https://github.com/omnigent-ai/omnigent/issues/1901) [Bug] kimi/qwen/goose/kiro forwarders blind-retry failed conversation- |
-| 80 | 59 | high | P1 | P2 ⚑ | +25 | [#1881](https://github.com/omnigent-ai/omnigent/issues/1881) [Bug] `omnigent setup` crashes with `ValueError: select() requires at  |
-| 81 | 59 | high | P1 | P2 ⚑ | +27 | [#1827](https://github.com/omnigent-ai/omnigent/issues/1827) [Bug] kimi-native: torn UTF-8 wire read crashes the forwarder; supervi |
-| 82 | 59 | high | P2 | P2 | +185 | [#1600](https://github.com/omnigent-ai/omnigent/issues/1600) Epic: 12-feature contribution (one issue + one PR per feature) |
-| 83 | 59 | high | P2 | P2 | +187 | [#1528](https://github.com/omnigent-ai/omnigent/issues/1528) Idle-session lifecycle UX: reap gracefully, resume seamlessly, surface |
-| 84 | 58 | high | P2 | P2 | +214 | [#1022](https://github.com/omnigent-ai/omnigent/issues/1022) Behind a corporate proxy, the host daemon can't reach the model backen |
-| 85 | 57 | medium | P2 | P2 | +214 | [#1021](https://github.com/omnigent-ai/omnigent/issues/1021) [Feature] GitHub Copilot as provider |
-| 86 | 54 | high | P2 | P2 | +58 | [#3798](https://github.com/omnigent-ai/omnigent/issues/3798) Android shell shows the SPA as if signed in while native login runs in |
-| 87 | 54 | high | P1 | P2 ⚑ | -58 | [#3469](https://github.com/omnigent-ai/omnigent/issues/3469) [Bug] Post-completion compaction spiral: merge-commit diff output trig |
-| 88 | 54 | high | P1 | P2 ⚑ | -23 | [#2629](https://github.com/omnigent-ai/omnigent/issues/2629) web_fetch sub-agent spawn fails with unknown harness 'omnigent' — bare |
-| 89 | 54 | high | P2 | P2 | +166 | [#1778](https://github.com/omnigent-ai/omnigent/issues/1778) opencode-native forwarder loses session content across SSE reconnects  |
-| 90 | 54 | high | P1 | P2 ⚑ | +38 | [#523](https://github.com/omnigent-ai/omnigent/issues/523) REPL pexpect e2e tests starve on boot under full shard load (60s _wait |
-| 91 | 53 | high | P1 | P2 ⚑ | -42 | [#3011](https://github.com/omnigent-ai/omnigent/issues/3011) kiro-native harness: interactive sessions never respond with kiro-cli  |
-| 92 | 53 | high | P1 | P2 ⚑ | -36 | [#2920](https://github.com/omnigent-ai/omnigent/issues/2920) Omnigent server fails to start on native Windows: os.getuid() at impor |
-| 93 | 53 | high | P1 | P2 ⚑ | -36 | [#2919](https://github.com/omnigent-ai/omnigent/issues/2919) omni setup crashes on Windows: ModuleNotFoundError: No module named 't |
-| 94 | 53 | high | P1 | P2 ⚑ | -15 | [#2422](https://github.com/omnigent-ai/omnigent/issues/2422) Windows: five chained defects break the documented degraded-mode subse |
-| 95 | 53 | high | P2 | P2 | +215 | [#762](https://github.com/omnigent-ai/omnigent/issues/762) [Bug] sub agent terminal crashes when cli starts with prompt for input |
-| 96 | 50 | medium | P2 | P2 | +108 | [#2744](https://github.com/omnigent-ai/omnigent/issues/2744) [Bug] codex-native: custom agents time out at launch — native provider |
-| 97 | 46 | medium | P1 | P2 ⚑ | -87 | [#3952](https://github.com/omnigent-ai/omnigent/issues/3952) A stale terminal exit removes the newer Codex resources of the same se |
-| 98 | 46 | medium | P2 | P2 | +93 | [#2984](https://github.com/omnigent-ai/omnigent/issues/2984) [Bug] Codex incorrectly reports `needs-auth` with an authenticated cus |
-| 99 | 46 | medium | P1 | P2 ⚑ | -7 | [#2184](https://github.com/omnigent-ai/omnigent/issues/2184) [Bug] Codex plugin skills are exposed with inconsistent names (`plugin |
-| 100 | 46 | medium | P1 | P2 ⚑ | -7 | [#2071](https://github.com/omnigent-ai/omnigent/issues/2071) [Bug] web_search never advertised to claude-sdk sessions: unprefixed m |
-| 101 | 46 | medium | P2 | P2 | +134 | [#2062](https://github.com/omnigent-ai/omnigent/issues/2062) [Bug] claude-native: per-session model override silently lost when wra |
-| 102 | 46 | medium | P1 | P2 ⚑ | +5 | [#1831](https://github.com/omnigent-ai/omnigent/issues/1831) claude-native workers ignore executor.model pin and per-dispatch args. |
-| 103 | 46 | medium | P1 | P2 ⚑ | +7 | [#1781](https://github.com/omnigent-ai/omnigent/issues/1781) codex harness: ambient DATABRICKS_BEARER/DATABRICKS_TOKEN overrides pr |
-| 104 | 46 | medium | P1 | P2 ⚑ | +15 | [#1128](https://github.com/omnigent-ai/omnigent/issues/1128) [Bug] Claude SDK Appears to Use Opus Instead of Selected Model |
-| 105 | 46 | medium | P1 | P2 ⚑ | +25 | [#241](https://github.com/omnigent-ai/omnigent/issues/241) pi harness: GPT and Gemini dispatches 404 on the Databricks ucode gate |
-| 106 | 46 | medium | P3 | P2 ⚑ | +241 | [#147](https://github.com/omnigent-ai/omnigent/issues/147) Tracking: gradual decomposition of monolith modules (cli.py 9.1KLOC, c |
-| 107 | 42 | medium | P1 | P2 ⚑ | -89 | [#3790](https://github.com/omnigent-ai/omnigent/issues/3790) force_sandbox policy is evaluated but structurally unreachable from cl |
-| 108 | 42 | medium | P2 | P2 | +150 | [#1724](https://github.com/omnigent-ai/omnigent/issues/1724) codex-native harness times out on WSL2 ("Codex TUI never started a thr |
-| 109 | 42 | medium | P1 | P2 ⚑ | -51 | [#2904](https://github.com/omnigent-ai/omnigent/issues/2904) [Bug] claude-native: web-UI chat input fails with "tmux command failed |
-| 110 | 42 | medium | P1 | P2 ⚑ | -29 | [#2397](https://github.com/omnigent-ai/omnigent/issues/2397) [Bug] Codex-native intelligent routing ignores live effort capabilitie |
-| 111 | 42 | medium | P1 | P2 ⚑ | -24 | [#2272](https://github.com/omnigent-ai/omnigent/issues/2272) [Bug] Codex runner can't find OpenRouter secret that exists in keyring |
-| 112 | 42 | medium | P2 | P2 | +192 | [#890](https://github.com/omnigent-ai/omnigent/issues/890) [Bug] omnigent setup fails with npm EACCES when installing the Claude  |
-| 113 | 42 | medium | P1 | P2 ⚑ | +12 | [#668](https://github.com/omnigent-ai/omnigent/issues/668) [Bug] BUG？omni claude times out (60s) on macOS with native Claude Code |
-| 114 | 38 | medium | P1 | P2 ⚑ | -98 | [#3852](https://github.com/omnigent-ai/omnigent/issues/3852) [Bug] Built-in write policies miss Claude Code's `MultiEdit` / `Notebo |
-| 115 | 38 | medium | P2 | P2 | +109 | [#2369](https://github.com/omnigent-ai/omnigent/issues/2369) [Bug] pi harness only lists databricks-claude-sonnet-4-6 |
-| 116 | 38 | medium | P1 | P2 ⚑ | -30 | [#2299](https://github.com/omnigent-ai/omnigent/issues/2299) [Bug] claude-native resume transcripts flatten tool_result image block |
-| 117 | 38 | medium | P2 | P2 | +104 | [#2390](https://github.com/omnigent-ai/omnigent/issues/2390) Builtin policy for per-user sub-agent access control (subagent_access_ |
-| 118 | 38 | medium | P2 | P2 | +206 | [#377](https://github.com/omnigent-ai/omnigent/issues/377) gpt sub-agent fails on startup with missing databricks-sdk dependency |
-| 119 | 38 | medium | P1 | P2 ⚑ | -10 | [#1794](https://github.com/omnigent-ai/omnigent/issues/1794) Bundled Polly: claude-sdk brain "Not logged in" + runaway spawn loop o |
-| 120 | 38 | medium | P1 | P2 ⚑ | -9 | [#1694](https://github.com/omnigent-ai/omnigent/issues/1694) Reliability: parallel code-fix missions fail silently (5s tmux timeout |
-| 121 | 37 | medium | P1 | P2 ⚑ | -79 | [#3101](https://github.com/omnigent-ai/omnigent/issues/3101) Docker/Kubernetes entrypoint never wires project_store — first-class P |
-| 122 | 36 | medium | P2 | P2 | +161 | [#1192](https://github.com/omnigent-ai/omnigent/issues/1192) [Bug] Manual /compact errors "Compaction requires a configured LLM mod |
-| 123 | 36 | medium | P1 | P2 ⚑ | -6 | [#1158](https://github.com/omnigent-ai/omnigent/issues/1158) [Bug] antigravity-native: TUI-typed turns never mirror to the web UI ( |
-| 124 | 36 | medium | P2 | P2 | +161 | [#1157](https://github.com/omnigent-ai/omnigent/issues/1157) [Bug] antigravity-native: no Chat/Terminal toggle — terminal_antigravi |
-| 125 | 36 | feature | P2 | P2 | +188 | [#692](https://github.com/omnigent-ai/omnigent/issues/692) Polly: fan out sub-agent work across multiple concurrent claude profil |
-| 126 | 36 | feature | P2 | P2 | +201 | [#197](https://github.com/omnigent-ai/omnigent/issues/197) Declarative skill sources: pull Claude Code skills + their dependency  |
-| 127 | 35 | medium | P2 | P2 | +110 | [#2055](https://github.com/omnigent-ai/omnigent/issues/2055) [Bug] codex-native harness elicitation: a resolve landing in the betwe |
-| 128 | 35 | medium | P1 | P2 ⚑ | -84 | [#3076](https://github.com/omnigent-ai/omnigent/issues/3076) [Bug] claude-sdk omits ToolSearch, eagerly loading every MCP schema |
-| 129 | 35 | medium | P3 | P2 ⚑ | +210 | [#2800](https://github.com/omnigent-ai/omnigent/issues/2800) [Bug] Top-level custom codex-native agents drop reasoning effort and y |
-| 130 | 35 | medium | P1 | P2 ⚑ | -7 | [#880](https://github.com/omnigent-ai/omnigent/issues/880) [BUG] Native harness (omnigent claude): assistant turns not streamed t |
-| 131 | 33 | medium | P1 | P2 ⚑ | -18 | [#1551](https://github.com/omnigent-ai/omnigent/issues/1551) opencode-native: blocking question tool not surfaced to web (no elicit |
-| 132 | 33 | medium | P2 | P2 | +2 | [#4009](https://github.com/omnigent-ai/omnigent/issues/4009) [Feature] No Go client for the session API, so every Go caller hand-ro |
-| 133 | 33 | medium | P1 | P2 ⚑ | -127 | [#3981](https://github.com/omnigent-ai/omnigent/issues/3981) [Bug] Desktop: Workspace rail resize is unusable on the Browser tab; a |
-| 134 | 33 | medium | P1 | P2 ⚑ | -121 | [#3898](https://github.com/omnigent-ai/omnigent/issues/3898) [Bug] Pack function policies fail server-side input evaluation unless  |
-| 135 | 33 | medium | P1 | P2 ⚑ | -121 | [#3870](https://github.com/omnigent-ai/omnigent/issues/3870) child-session creation returns 500 internal_error, breaking Polly/Debb |
-| 136 | 33 | medium | P2 | P2 | +6 | [#3864](https://github.com/omnigent-ai/omnigent/issues/3864) [Bug] to_api_dict() drops ConversationItem.created_at, so flat items A |
-| 137 | 33 | medium | P1 | P2 ⚑ | -122 | [#3863](https://github.com/omnigent-ai/omnigent/issues/3863) [Bug] Databricks Apps entrypoint never wires project_store — Projects  |
-| 138 | 33 | medium | P2 | P2 | +5 | [#3861](https://github.com/omnigent-ai/omnigent/issues/3861) [Bug] omni host status renders URLs so terminals link the whole status |
-| 139 | 33 | medium | P2 | P2 | +13 | [#3563](https://github.com/omnigent-ai/omnigent/issues/3563) [Bug] Host-bound resume into a deleted workspace: host computes the ex |
-| 140 | 33 | medium | P2 | P2 | +13 | [#3561](https://github.com/omnigent-ai/omnigent/issues/3561) [Bug] `prompt_policy` never sends `_CLASSIFIER_SCHEMA` to the LLM — st |
-| 141 | 33 | medium | P2 | P2 | +14 | [#3550](https://github.com/omnigent-ai/omnigent/issues/3550) [Bug] Missing signing alg's prevent using some OIDC providers |
-| 142 | 33 | medium | P2 | P2 | +18 | [#3435](https://github.com/omnigent-ai/omnigent/issues/3435) [Feature] Admin server-wide usage report (per-user and per-model cost) |
-| 143 | 33 | medium | none | P2 | +210 | [#3402](https://github.com/omnigent-ai/omnigent/issues/3402) [Bug] Label seeding and session-state writes race under concurrent upd |
-| 144 | 33 | medium | P2 | P2 | +18 | [#3368](https://github.com/omnigent-ai/omnigent/issues/3368) Feature: first-class async write-safety (freeze → approve → apply) pri |
-| 145 | 33 | medium | P2 | P2 | +20 | [#3352](https://github.com/omnigent-ai/omnigent/issues/3352) [Feature] OpenClaw onboarding — Option B: chat import (SQLite session  |
-| 146 | 33 | medium | P2 | P2 | +24 | [#3247](https://github.com/omnigent-ai/omnigent/issues/3247) credential_proxy: re-resolve the source on 401 / expiry (short-lived t |
-| 147 | 33 | medium | P1 | P2 ⚑ | -107 | [#3236](https://github.com/omnigent-ai/omnigent/issues/3236) web_search: bare executor.model strings are inferred as provider 'open |
-| 148 | 33 | medium | P2 | P2 | +28 | [#3219](https://github.com/omnigent-ai/omnigent/issues/3219) [Bug] Cmd/Ctrl+Up/Down session traversal stops in an empty focused com |
-| 149 | 33 | medium | P2 | P2 | +43 | [#2921](https://github.com/omnigent-ai/omnigent/issues/2921) Font settings: selected font (incl. Nerd Fonts) never loads — no webfo |
-| 150 | 33 | medium | P1 | P2 ⚑ | -90 | [#2854](https://github.com/omnigent-ai/omnigent/issues/2854) [Bug] Cross-harness `harness_override` is ignored on the `initial_item |
-| 151 | 33 | medium | P2 | P2 | +45 | [#2851](https://github.com/omnigent-ai/omnigent/issues/2851) Policy-supplied targets for ASK approval cards |
-| 152 | 33 | medium | P2 | P2 | +50 | [#2756](https://github.com/omnigent-ai/omnigent/issues/2756) Expose atomic session-event admission to integrations |
-| 153 | 33 | medium | P2 | P2 | +59 | [#2577](https://github.com/omnigent-ai/omnigent/issues/2577) [Feature] Manage OIDC/SSO admins from an id_token claim (IdP group/rol |
-| 154 | 33 | medium | P2 | P2 | +59 | [#2558](https://github.com/omnigent-ai/omnigent/issues/2558) Distribution / Installation / Enterprise Readiness |
-| 155 | 33 | medium | P1 | P2 ⚑ | -85 | [#2539](https://github.com/omnigent-ai/omnigent/issues/2539) Named sys_session_send returns 404 after first child from a bundled se |
-| 156 | 33 | medium | P1 | P2 ⚑ | -85 | [#2524](https://github.com/omnigent-ai/omnigent/issues/2524) [Bug] Registering remote host fails |
-| 157 | 33 | medium | P1 | P2 ⚑ | -84 | [#2444](https://github.com/omnigent-ai/omnigent/issues/2444) Accounts JWT expiry falls through to Databricks auth and breaks persis |
-| 158 | 33 | medium | P2 | P2 | +62 | [#2404](https://github.com/omnigent-ai/omnigent/issues/2404) fix(runtime): orphan sweep can abort startup on unreadable shared-host |
-| 159 | 33 | medium | P2 | P2 | +63 | [#2374](https://github.com/omnigent-ai/omnigent/issues/2374) Proposal: per-turn context_providers to augment system instructions at |
-| 160 | 33 | medium | P1 | P2 ⚑ | -75 | [#2304](https://github.com/omnigent-ai/omnigent/issues/2304) Runner subprocess inherits host daemon cwd, causing os_env cwd resolut |
-| 161 | 33 | medium | P2 | P2 | +73 | [#2070](https://github.com/omnigent-ai/omnigent/issues/2070) [Feature] sys_os_* file tools are hard-confined to the session workspa |
-| 162 | 33 | medium | P2 | P2 | +109 | [#1526](https://github.com/omnigent-ai/omnigent/issues/1526) Refactor: incrementally decompose the 4 god-files (sessions.py, runner |
-| 163 | 33 | medium | P2 | P2 | +111 | [#1411](https://github.com/omnigent-ai/omnigent/issues/1411) Standalone reusable MCP servers: CRUD + connection verify (list tools) |
-| 164 | 33 | medium | P2 | P2 | +126 | [#1075](https://github.com/omnigent-ai/omnigent/issues/1075) [Feature] Support AWS Lambda / Firecracker microVMs as managed sandbox |
-| 165 | 33 | medium | P2 | P2 | +127 | [#1055](https://github.com/omnigent-ai/omnigent/issues/1055) [Test] End-to-end OTel test against a real collector to lock in the BY |
-| 166 | 33 | medium | P2 | P2 | +127 | [#1054](https://github.com/omnigent-ai/omnigent/issues/1054) [Feature] Record gen_ai.retry events on llm_call spans |
-| 167 | 33 | medium | P2 | P2 | +130 | [#1031](https://github.com/omnigent-ai/omnigent/issues/1031) [Feature] Support serving the standalone Web UI under a subpath, e.g.  |
-| 168 | 33 | medium | P2 | P2 | +132 | [#983](https://github.com/omnigent-ai/omnigent/issues/983) Session sharing ergonomics: `sys_session_share` agent tool + `omnigent |
-| 169 | 33 | medium | P2 | P2 | +139 | [#857](https://github.com/omnigent-ai/omnigent/issues/857) [Proposal] Usage-limit detection + on-429 failover across pooled provi |
-| 170 | 33 | medium | P1 | P2 ⚑ | -46 | [#765](https://github.com/omnigent-ai/omnigent/issues/765) Support interactive mid-flight policy ASK (TOOL_CALL/TOOL_RESULT/OUTPU |
-| 171 | 33 | medium | P1 | P2 ⚑ | -45 | [#547](https://github.com/omnigent-ai/omnigent/issues/547) Bug: Polly model switcher sends invalid Cursor SDK model id |
-| 172 | 33 | medium | P1 | P2 ⚑ | -43 | [#522](https://github.com/omnigent-ai/omnigent/issues/522) Implement async-tool completion auto-delivery (SESSION_REARCHITECTURE  |
-| 173 | 33 | medium | P2 | P2 | +145 | [#509](https://github.com/omnigent-ai/omnigent/issues/509) [Feature] Default new-session workspace from selected agent's cwd |
-| 174 | 33 | medium | P2 | P2 | +149 | [#382](https://github.com/omnigent-ai/omnigent/issues/382) Evaluating the same agent across harnesses: no built-in way to compare |
-| 175 | 33 | medium | P1 | P2 ⚑ | -75 | [#1936](https://github.com/omnigent-ai/omnigent/issues/1936) [BUG] copilot harness: 401 Bad credentials when no token is explicitly |
-| 176 | 32 | feature | P2 | P2 | +97 | [#1454](https://github.com/omnigent-ai/omnigent/issues/1454) [Feature] Change permission mode of a running claude-native session fr |
-| 177 | 31 | medium | P1 | P2 ⚑ | -99 | [#2429](https://github.com/omnigent-ai/omnigent/issues/2429) Server (python -m omnigent.cli server) CPU-spins indefinitely with no  |
-| 178 | 31 | medium | P1 | P2 ⚑ | -58 | [#1113](https://github.com/omnigent-ai/omnigent/issues/1113) Native sub-agent/runner failures surface as bare "failed" with no reas |
-| 179 | 31 | feature | P2 | P2 | -1 | [#3150](https://github.com/omnigent-ai/omnigent/issues/3150) [Feature] CLI: cross-harness fork — continue an existing session in a  |
-| 180 | 31 | feature | P2 | P2 | +79 | [#1703](https://github.com/omnigent-ai/omnigent/issues/1703) [Feature] Unify harness naming: bare names (claude, codex, …) are ambi |
-| 181 | 31 | feature | P3 | P2 ⚑ | +161 | [#1678](https://github.com/omnigent-ai/omnigent/issues/1678) tech-debt(codex-native): extract a string-field helper for repeated di |
-| 182 | 31 | feature | P2 | P2 | +137 | [#503](https://github.com/omnigent-ai/omnigent/issues/503) [Feature] Switch Claude Code account per session via isolated profiles |
-| 183 | 30 | feature | P2 | P2 | +42 | [#2303](https://github.com/omnigent-ai/omnigent/issues/2303) [Feature] Support multi-repo workspaces (nested Git repos or multiple  |
-| 184 | 30 | medium | P2 | P2 | -2 | [#3083](https://github.com/omnigent-ai/omnigent/issues/3083) [Bug] Cursor sessions launched from Omnigent Web is losing MCPs |
-| 185 | 30 | medium | P1 | P2 ⚑ | -67 | [#1156](https://github.com/omnigent-ai/omnigent/issues/1156) [Bug] antigravity-native: web/mobile turns never appear in the native  |
-| 186 | 30 | medium | P2 | P2 | -17 | [#3250](https://github.com/omnigent-ai/omnigent/issues/3250) flaky e2e_ui: test_scheduled_task_create_edit_modal_and_time_picker ti |
-| 187 | 30 | medium | P2 | P2 | +11 | [#2848](https://github.com/omnigent-ai/omnigent/issues/2848) Server logs an expected offline-runner resource 503 as ERROR + full tr |
-| 188 | 30 | medium | P2 | P2 | +13 | [#2767](https://github.com/omnigent-ai/omnigent/issues/2767) [Bug] SQLite pool (default 5+10) not sized to the 200-thread limiter → |
-| 189 | 30 | medium | P1 | P2 ⚑ | -106 | [#2357](https://github.com/omnigent-ai/omnigent/issues/2357) [Bug] admin fleet-view calls SqlAlchemyConversationStore.list_conversa |
-| 190 | 30 | medium | P1 | P2 ⚑ | -95 | [#2052](https://github.com/omnigent-ai/omnigent/issues/2052) [Bug] web_fetch's __web_researcher helper sub-agent fails on 0.4.0 (si |
-| 191 | 30 | medium | P1 | P2 ⚑ | -90 | [#1920](https://github.com/omnigent-ai/omnigent/issues/1920) Seeder matching-hash fast path can't self-heal a lost artifact-store b |
-| 192 | 30 | medium | P1 | P2 ⚑ | -86 | [#1857](https://github.com/omnigent-ai/omnigent/issues/1857) Host daemon stays alive but shows offline — server-dropped host tunnel |
-| 193 | 30 | medium | P1 | P2 ⚑ | -81 | [#1686](https://github.com/omnigent-ai/omnigent/issues/1686) xai: reasoning_effort sent to all Grok models returns HTTP 400 on unsu |
-| 194 | 30 | medium | P2 | P2 | +94 | [#1117](https://github.com/omnigent-ai/omnigent/issues/1117) async generator ignored GeneratorExit — orphaned SSE relay task, excep |
-| 195 | 30 | medium | P2 | P2 | +117 | [#725](https://github.com/omnigent-ai/omnigent/issues/725) Changes panel is empty for native-harness and external edits in non-gi |
-| 196 | 30 | medium | P2 | P2 | +134 | [#146](https://github.com/omnigent-ai/omnigent/issues/146) StreamHooks.on_sub_agent_spawned / on_sub_agent_completed are declared |
-| 197 | 30 | medium | P1 | P2 ⚑ | -192 | [#3982](https://github.com/omnigent-ai/omnigent/issues/3982) [Bug] electron-build.yml pnpm filter matches no package: desktop packa |
-| 198 | 30 | medium | P3 | P2 ⚑ | +138 | [#3733](https://github.com/omnigent-ai/omnigent/issues/3733) [Bug] Android: hardcoded 25px switcher height makes the chat scroll-fa |
-| 199 | 30 | medium | P2 | P2 | -52 | [#3732](https://github.com/omnigent-ai/omnigent/issues/3732) [Bug] Android: a Display-size change leaves the server-switcher pill's |
-| 200 | 30 | medium | P2 | P2 | -50 | [#3592](https://github.com/omnigent-ai/omnigent/issues/3592) [Feature] Deterministic long-term memory (automatic recall/retain) — f |
+| 1 | 161 | critical | P2 | P0 ⚑ | +231 | [#2125](https://github.com/omnigent-ai/omnigent/issues/2125) [Feature] Multi-host git credentials for managed sandboxes (GitHub + s |
+| 2 | 154 | critical | P2 | P0 ⚑ | +234 | [#2057](https://github.com/omnigent-ai/omnigent/issues/2057) [Feature] Add Codex Auto mode using auto_review instead of jumping to  |
+| 3 | 154 | critical | P2 | P0 ⚑ | +235 | [#2054](https://github.com/omnigent-ai/omnigent/issues/2054) [Feature] Remove duplicate Codex Full access mode and keep Sandbox Byp |
+| 4 | 139 | high | P2 | P0 ⚑ | +291 | [#1051](https://github.com/omnigent-ai/omnigent/issues/1051) [Feature] Forward OTel exporter knobs to executor subprocess env |
+| 5 | 127 | high | P2 | P0 ⚑ | +235 | [#2038](https://github.com/omnigent-ai/omnigent/issues/2038) [Feature] No way to deregister/delete an external self-registered host |
+| 6 | 126 | high | P1 | P0 ⚑ | +31 | [#3265](https://github.com/omnigent-ai/omnigent/issues/3265) claude-sdk agent with linux_bwrap dies at spawn on a runtime bwrap bin |
+| 7 | 121 | high | P2 | P0 ⚑ | +327 | [#16](https://github.com/omnigent-ai/omnigent/issues/16) Is native Windows support in scope, or should docs recommend WSL2? |
+| 8 | 121 | critical | P1 | P0 ⚑ | -4 | [#3983](https://github.com/omnigent-ai/omnigent/issues/3983) [Bug] Smart-routed turns render out of order: reply streams above the  |
+| 9 | 121 | critical | P1 | P0 ⚑ | +26 | [#3270](https://github.com/omnigent-ai/omnigent/issues/3270) [Bug] sys_session_create children are absent from both sys_session_lis |
+| 10 | 110 | critical | P0 | P0 | -9 | [#3557](https://github.com/omnigent-ai/omnigent/issues/3557) [Bug] Shell-surface policy gates are bypassed by option-taking command |
+| 11 | 109 | high | P2 | P0 ⚑ | +125 | [#3976](https://github.com/omnigent-ai/omnigent/issues/3976) [Feature] OAuth2 client-credentials grant so a headless process can au |
+| 12 | 109 | high | P2 | P0 ⚑ | +152 | [#3363](https://github.com/omnigent-ai/omnigent/issues/3363) [Feature] Per-project custom instructions (project-scoped context) |
+| 13 | 109 | high | P2 | P0 ⚑ | +263 | [#1388](https://github.com/omnigent-ai/omnigent/issues/1388) Make agents a first-class CRUD entity with a dedicated sidebar UI (dec |
+| 14 | 109 | critical | P2 | P0 ⚑ | +301 | [#659](https://github.com/omnigent-ai/omnigent/issues/659) [Feature] add a microvm backend for sandbox |
+| 15 | 100 | critical | P3 | P0 ⚑ | +334 | [#61](https://github.com/omnigent-ai/omnigent/issues/61) 🤖 Code Audit: 21 potential issue(s) found |
+| 16 | 99 | high | P2 | P1 ⚑ | +121 | [#3970](https://github.com/omnigent-ai/omnigent/issues/3970) pi-native: every turn fails with "Pi model error: 401 Invalid Token" w |
+| 17 | 99 | high | P1 | P1 | +35 | [#3001](https://github.com/omnigent-ai/omnigent/issues/3001) [Performance] GET /v1/sessions pre-fetches every accessible conversati |
+| 18 | 92 | high | P1 | P1 | +15 | [#3299](https://github.com/omnigent-ai/omnigent/issues/3299) [Bug] Harness-credential route times out with a misleading 504 against |
+| 19 | 92 | high | P2 | P1 ⚑ | +147 | [#3284](https://github.com/omnigent-ai/omnigent/issues/3284) [Crash] DuplicateOptionError: While reading from PosixPath('/Users/*** |
+| 20 | 92 | high | P1 | P1 | +21 | [#3180](https://github.com/omnigent-ai/omnigent/issues/3180) codex-native: runner never exits on idle timeout — cancelled delta-coa |
+| 21 | 92 | high | P2 | P1 ⚑ | +163 | [#3070](https://github.com/omnigent-ai/omnigent/issues/3070) No progress signal on a stuck or interactive harness install |
+| 22 | 92 | high | P1 | P1 | +33 | [#2967](https://github.com/omnigent-ai/omnigent/issues/2967) [Bug] A full context window bricks a session with "Prompt is too long" |
+| 23 | 92 | high | P1 | P1 | +59 | [#2373](https://github.com/omnigent-ai/omnigent/issues/2373) [Bug] claude-native: pasted web-UI message loses its Enter, stuck draf |
+| 24 | 92 | high | P1 | P1 | +70 | [#2060](https://github.com/omnigent-ai/omnigent/issues/2060) [Bug] claude-native: first web-UI message silently dropped when Claude |
+| 25 | 92 | high | P1 | P1 | +78 | [#1898](https://github.com/omnigent-ai/omnigent/issues/1898) [Bug] codex-native: cancelling a task awaiting flush() poisons the del |
+| 26 | 92 | high | P2 | P1 ⚑ | +244 | [#1528](https://github.com/omnigent-ai/omnigent/issues/1528) Idle-session lifecycle UX: reap gracefully, resume seamlessly, surface |
+| 27 | 92 | high | P2 | P1 ⚑ | +289 | [#654](https://github.com/omnigent-ai/omnigent/issues/654) [Bug] Streaming with codex is hanging and paragraphs are not split. |
+| 28 | 92 | high | P1 | P1 | +99 | [#542](https://github.com/omnigent-ai/omnigent/issues/542) [Bug] AttributeError: 'SubprocessCLITransport' object has no attribute |
+| 29 | 89 | high | P2 | P1 ⚑ | +148 | [#3164](https://github.com/omnigent-ai/omnigent/issues/3164) [Feature] Optional runtimeClassName on the kubernetes sandbox provider |
+| 30 | 84 | high | P2 | P1 ⚑ | +124 | [#3558](https://github.com/omnigent-ai/omnigent/issues/3558) claude-sdk: cached client does not rebuild on framework-instruction ch |
+| 31 | 84 | high | P1 | P1 | +22 | [#3000](https://github.com/omnigent-ai/omnigent/issues/3000) claude-native transcript forwarder polls at 4 Hz per session with no i |
+| 32 | 84 | high | P1 | P1 | +30 | [#2748](https://github.com/omnigent-ai/omnigent/issues/2748) Runner idle-shutdown deadlocks forever: codex-forwarder close()/flush( |
+| 33 | 84 | high | P1 | P1 | +32 | [#2629](https://github.com/omnigent-ai/omnigent/issues/2629) web_fetch sub-agent spawn fails with unknown harness 'omnigent' — bare |
+| 34 | 84 | high | P1 | P1 | +33 | [#2575](https://github.com/omnigent-ai/omnigent/issues/2575) pi-native: non-Claude Databricks models (GLM, Gemini, …) hang — provid |
+| 35 | 84 | high | P1 | P1 | +37 | [#2454](https://github.com/omnigent-ai/omnigent/issues/2454) [Bug] Unbounded ~/.omnigent growth: per-session native-harness dirs ar |
+| 36 | 84 | high | P1 | P1 | +44 | [#2421](https://github.com/omnigent-ai/omnigent/issues/2421) [Bug] codex app-server + MCP bridge children leak on ANY unclean runne |
+| 37 | 84 | high | P1 | P1 | +91 | [#523](https://github.com/omnigent-ai/omnigent/issues/523) REPL pexpect e2e tests starve on boot under full shard load (60s _wait |
+| 38 | 83 | high | P1 | P1 | +18 | [#2920](https://github.com/omnigent-ai/omnigent/issues/2920) Omnigent server fails to start on native Windows: os.getuid() at impor |
+| 39 | 83 | high | P1 | P1 | +18 | [#2919](https://github.com/omnigent-ai/omnigent/issues/2919) omni setup crashes on Windows: ModuleNotFoundError: No module named 't |
+| 40 | 83 | high | P2 | P1 ⚑ | +168 | [#2714](https://github.com/omnigent-ai/omnigent/issues/2714) Upgrade openai-agents and remove the temporary openai<2.45 cap |
+| 41 | 83 | high | P1 | P1 | +38 | [#2422](https://github.com/omnigent-ai/omnigent/issues/2422) Windows: five chained defects break the documented degraded-mode subse |
+| 42 | 83 | high | P1 | P1 | +48 | [#2245](https://github.com/omnigent-ai/omnigent/issues/2245) [Bug] openai-agents harness turn wedges permanently after policy-verdi |
+| 43 | 83 | high | P2 | P1 ⚑ | +267 | [#762](https://github.com/omnigent-ai/omnigent/issues/762) [Bug] sub agent terminal crashes when cli starts with prompt for input |
+| 44 | 83 | high | P2 | P1 ⚑ | +261 | [#888](https://github.com/omnigent-ai/omnigent/issues/888) [Feature] Side-by-side multi-session view |
+| 45 | 77 | high | P1 | P1 | -7 | [#3261](https://github.com/omnigent-ai/omnigent/issues/3261) [Crash] AttributeError: module 'os' has no attribute 'WNOHANG' |
+| 46 | 76 | high | P2 | P1 ⚑ | +283 | [#151](https://github.com/omnigent-ai/omnigent/issues/151) Native claude_code worker hangs on the one-time Bypass Permissions acc |
+| 47 | 73 | high | P1 | P1 | -19 | [#3482](https://github.com/omnigent-ai/omnigent/issues/3482) [Crash] ServerError: |
+| 48 | 73 | high | P1 | P1 | -18 | [#3458](https://github.com/omnigent-ai/omnigent/issues/3458) session-updates stream crashes with KeyError when a client watches a c |
+| 49 | 73 | high | P2 | P1 ⚑ | +118 | [#3271](https://github.com/omnigent-ai/omnigent/issues/3271) [Feature] Expose per-session context size + last-turn timestamp to age |
+| 50 | 73 | high | P2 | P1 ⚑ | +123 | [#3231](https://github.com/omnigent-ai/omnigent/issues/3231) [Crash] OmnigentError: {'error_code': 403, 'message': 'Invalid access  |
+| 51 | 73 | high | P0 | P1 ⚑ | -49 | [#2355](https://github.com/omnigent-ai/omnigent/issues/2355) [Bug] workspace_id PK-widening migration crashes on populated Postgres |
+| 52 | 73 | high | P3 | P1 ⚑ | +289 | [#2224](https://github.com/omnigent-ai/omnigent/issues/2224) [Bug] get_client model-change check fails for harness="any" |
+| 53 | 73 | high | P1 | P1 | +45 | [#1985](https://github.com/omnigent-ai/omnigent/issues/1985) Headless `omnigent run -p` intermittently hangs forever despite the tu |
+| 54 | 73 | high | P2 | P1 ⚑ | +190 | [#1907](https://github.com/omnigent-ai/omnigent/issues/1907) Sub-agent model_override triggers an unnecessary first-turn harness re |
+| 55 | 73 | high | P2 | P1 ⚑ | +198 | [#1804](https://github.com/omnigent-ai/omnigent/issues/1804) spec parser crashes with TypeError on a null tools.builtins key (and s |
+| 56 | 73 | high | P2 | P1 ⚑ | +211 | [#1600](https://github.com/omnigent-ai/omnigent/issues/1600) Epic: 12-feature contribution (one issue + one PR per feature) |
+| 57 | 73 | high | P2 | P1 ⚑ | +232 | [#1076](https://github.com/omnigent-ai/omnigent/issues/1076) Runner-layer Tier-2 escalation: release an unresponsive per-conversati |
+| 58 | 73 | high | P1 | P1 | +63 | [#1026](https://github.com/omnigent-ai/omnigent/issues/1026) Runner orphans tool callbacks with "no active turn context" after mid- |
+| 59 | 66 | high | P1 | P1 | -51 | [#3971](https://github.com/omnigent-ai/omnigent/issues/3971) Host runners inherit the daemon's cwd; a deleted launch dir breaks eve |
+| 60 | 66 | high | P2 | P1 ⚑ | +86 | [#3750](https://github.com/omnigent-ai/omnigent/issues/3750) [Crash] PermissionError: [Errno 1] Operation not permitted |
+| 61 | 66 | high | P1 | P1 | -32 | [#3469](https://github.com/omnigent-ai/omnigent/issues/3469) [Bug] Post-completion compaction spiral: merge-commit diff output trig |
+| 62 | 66 | high | P1 | P1 | -30 | [#3359](https://github.com/omnigent-ai/omnigent/issues/3359) [Crash] ModuleNotFoundError: No module named 'termios' |
+| 63 | 66 | high | P1 | P1 | -29 | [#3274](https://github.com/omnigent-ai/omnigent/issues/3274) Sub-agent terminal status rejected with missing_parent_inbox and retri |
+| 64 | 66 | high | P1 | P1 | -25 | [#3251](https://github.com/omnigent-ai/omnigent/issues/3251) [Crash] ModuleNotFoundError: No module named 'termios' |
+| 65 | 66 | high | P1 | P1 | -20 | [#3052](https://github.com/omnigent-ai/omnigent/issues/3052) [Crash] ModuleNotFoundError: No module named 'termios' |
+| 66 | 66 | high | P1 | P1 | -20 | [#3023](https://github.com/omnigent-ai/omnigent/issues/3023) [Crash] ModuleNotFoundError: No module named 'termios' |
+| 67 | 66 | high | P1 | P1 | -20 | [#3016](https://github.com/omnigent-ai/omnigent/issues/3016) [Bug] A transient session-snapshot failure permanently pins a session  |
+| 68 | 66 | high | P1 | P1 | -20 | [#3012](https://github.com/omnigent-ai/omnigent/issues/3012) Hosts authenticated via `omnigent login` permanently 403 on first reco |
+| 69 | 66 | high | P1 | P1 | -15 | [#2993](https://github.com/omnigent-ai/omnigent/issues/2993) [Crash] ModuleNotFoundError: No module named 'termios' |
+| 70 | 66 | high | P3 | P1 ⚑ | +267 | [#2887](https://github.com/omnigent-ai/omnigent/issues/2887) [Bug] web/package-lock.json is out of sync with package.json; plain `n |
+| 71 | 66 | high | P1 | P1 | -3 | [#2559](https://github.com/omnigent-ai/omnigent/issues/2559) Conversation bricked: Page fails to load when opening markdown file af |
+| 72 | 66 | high | P2 | P1 ⚑ | +146 | [#2428](https://github.com/omnigent-ai/omnigent/issues/2428) sys_session_send to a completed session hangs to ReadTimeout and is si |
+| 73 | 66 | high | P1 | P1 | +18 | [#2241](https://github.com/omnigent-ai/omnigent/issues/2241) Flaky on main: test_interrupt_forwards_to_harness_before_cancelling ti |
+| 74 | 66 | high | P1 | P1 | +22 | [#2051](https://github.com/omnigent-ai/omnigent/issues/2051) [Bug] sys_session_send(session_id=…) completions never drain to sys_re |
+| 75 | 66 | high | P1 | P1 | +29 | [#1888](https://github.com/omnigent-ai/omnigent/issues/1888) ansi-to-react default import resolves to the CJS exports object under  |
+| 76 | 66 | high | P2 | P1 ⚑ | +179 | [#1778](https://github.com/omnigent-ai/omnigent/issues/1778) opencode-native forwarder loses session content across SSE reconnects  |
+| 77 | 66 | high | P0 | P1 ⚑ | -74 | [#1657](https://github.com/omnigent-ai/omnigent/issues/1657) hermes-native forwarder advances last_id per item, dropping a row's la |
+| 78 | 66 | high | P2 | P1 ⚑ | +236 | [#678](https://github.com/omnigent-ai/omnigent/issues/678) e2e: sub-agent supervisor routing / named-sub-agent auto-wake flakes ( |
+| 79 | 65 | high | P2 | P1 ⚑ | +137 | [#2480](https://github.com/omnigent-ai/omnigent/issues/2480) [Bug] Postgres-backed local server: bare `No module named 'psycopg'` + |
+| 80 | 65 | high | P1 | P1 | +19 | [#1953](https://github.com/omnigent-ai/omnigent/issues/1953) `omni host` dies permanently when the OIDC session JWT expires — no re |
+| 81 | 63 | high | P2 | P1 ⚑ | +217 | [#1022](https://github.com/omnigent-ai/omnigent/issues/1022) Behind a corporate proxy, the host daemon can't reach the model backen |
+| 82 | 61 | medium | P2 | P1 ⚑ | +186 | [#1596](https://github.com/omnigent-ai/omnigent/issues/1596) Native-CLI harness (claude-native/codex-native) as a named agent's own |
+| 83 | 60 | high | P2 | P1 ⚑ | +89 | [#3235](https://github.com/omnigent-ai/omnigent/issues/3235) Flaky E2E UI: test_scheduled_task_create_edit_modal_and_time_picker[ch |
+| 84 | 59 | high | P1 | P2 ⚑ | -67 | [#3799](https://github.com/omnigent-ai/omnigent/issues/3799) Android shell cannot sign in to servers behind a front-door auth proxy |
+| 85 | 59 | high | P1 | P2 ⚑ | -65 | [#3730](https://github.com/omnigent-ai/omnigent/issues/3730) [Bug] Android: renderer death terminates the app — OmnigentWebViewClie |
+| 86 | 59 | high | P1 | P2 ⚑ | -64 | [#3701](https://github.com/omnigent-ai/omnigent/issues/3701) [Bug] Desktop app never completes Okta security key / biometric MFA du |
+| 87 | 59 | high | P1 | P2 ⚑ | +1 | [#2270](https://github.com/omnigent-ai/omnigent/issues/2270) Windows: config list crashes — UnicodeEncodeError on cp1252 (non-UTF8) |
+| 88 | 59 | high | P1 | P2 ⚑ | +1 | [#2269](https://github.com/omnigent-ai/omnigent/issues/2269) Windows: omnigent setup crashes — ModuleNotFoundError: No module named |
+| 89 | 59 | high | P1 | P2 ⚑ | +13 | [#1901](https://github.com/omnigent-ai/omnigent/issues/1901) [Bug] kimi/qwen/goose/kiro forwarders blind-retry failed conversation- |
+| 90 | 59 | high | P1 | P2 ⚑ | +15 | [#1881](https://github.com/omnigent-ai/omnigent/issues/1881) [Bug] `omnigent setup` crashes with `ValueError: select() requires at  |
+| 91 | 59 | high | P1 | P2 ⚑ | +17 | [#1827](https://github.com/omnigent-ai/omnigent/issues/1827) [Bug] kimi-native: torn UTF-8 wire read crashes the forwarder; supervi |
+| 92 | 58 | high | P1 | P2 ⚑ | +39 | [#108](https://github.com/omnigent-ai/omnigent/issues/108) Cannot install on Linux aarch64 — cel-expr-python has no aarch64 wheel |
+| 93 | 57 | medium | P2 | P2 | +206 | [#1021](https://github.com/omnigent-ai/omnigent/issues/1021) [Feature] GitHub Copilot as provider |
+| 94 | 54 | medium | P2 | P2 | +230 | [#377](https://github.com/omnigent-ai/omnigent/issues/377) gpt sub-agent fails on startup with missing databricks-sdk dependency |
+| 95 | 54 | high | P2 | P2 | +49 | [#3798](https://github.com/omnigent-ai/omnigent/issues/3798) Android shell shows the SPA as if signed in while native login runs in |
+| 96 | 53 | high | P1 | P2 ⚑ | -47 | [#3011](https://github.com/omnigent-ai/omnigent/issues/3011) kiro-native harness: interactive sessions never respond with kiro-cli  |
+| 97 | 50 | medium | P2 | P2 | +107 | [#2744](https://github.com/omnigent-ai/omnigent/issues/2744) [Bug] codex-native: custom agents time out at launch — native provider |
+| 98 | 46 | medium | P1 | P2 ⚑ | -88 | [#3952](https://github.com/omnigent-ai/omnigent/issues/3952) A stale terminal exit removes the newer Codex resources of the same se |
+| 99 | 46 | medium | P2 | P2 | +51 | [#3592](https://github.com/omnigent-ai/omnigent/issues/3592) [Feature] Deterministic long-term memory (automatic recall/retain) — f |
+| 100 | 46 | medium | P1 | P2 ⚑ | -75 | [#3536](https://github.com/omnigent-ai/omnigent/issues/3536) [Bug] A session's `reasoning_effort` never reaches in-process harnesse |
+| 101 | 46 | medium | P2 | P2 | +60 | [#3369](https://github.com/omnigent-ai/omnigent/issues/3369) Feature: a policy that fences a spawned type: agent worker read-only ( |
+| 102 | 46 | medium | P2 | P2 | +66 | [#3254](https://github.com/omnigent-ai/omnigent/issues/3254) Sub-agent silently stalls after repeated context compactions during re |
+| 103 | 46 | medium | P2 | P2 | +82 | [#3069](https://github.com/omnigent-ai/omnigent/issues/3069) Harness install surfaces opaque failure reasons (npm stderr not captur |
+| 104 | 46 | medium | P2 | P2 | +87 | [#2984](https://github.com/omnigent-ai/omnigent/issues/2984) [Bug] Codex incorrectly reports `needs-auth` with an authenticated cus |
+| 105 | 46 | medium | P3 | P2 ⚑ | +233 | [#2853](https://github.com/omnigent-ai/omnigent/issues/2853) [Bug] Native harnesses silently drop the agent spec `prompt:` at runti |
+| 106 | 46 | medium | P2 | P2 | +94 | [#2815](https://github.com/omnigent-ai/omnigent/issues/2815) [Feature] Distinguish human waits from machine-liveness deadlines |
+| 107 | 46 | medium | P2 | P2 | +100 | [#2719](https://github.com/omnigent-ai/omnigent/issues/2719) [Bug] |
+| 108 | 46 | medium | P2 | P2 | +103 | [#2644](https://github.com/omnigent-ai/omnigent/issues/2644) Design discussion: deterministic verification gates (a PASS/FAIL quali |
+| 109 | 46 | medium | P1 | P2 ⚑ | -17 | [#2184](https://github.com/omnigent-ai/omnigent/issues/2184) [Bug] Codex plugin skills are exposed with inconsistent names (`plugin |
+| 110 | 46 | medium | P1 | P2 ⚑ | -17 | [#2071](https://github.com/omnigent-ai/omnigent/issues/2071) [Bug] web_search never advertised to claude-sdk sessions: unprefixed m |
+| 111 | 46 | medium | P2 | P2 | +124 | [#2062](https://github.com/omnigent-ai/omnigent/issues/2062) [Bug] claude-native: per-session model override silently lost when wra |
+| 112 | 46 | medium | P1 | P2 ⚑ | -5 | [#1831](https://github.com/omnigent-ai/omnigent/issues/1831) claude-native workers ignore executor.model pin and per-dispatch args. |
+| 113 | 46 | medium | P2 | P2 | +141 | [#1789](https://github.com/omnigent-ai/omnigent/issues/1789) Feature: Canvas — agent-authored artifact panel (#2) |
+| 114 | 46 | medium | P1 | P2 ⚑ | -4 | [#1781](https://github.com/omnigent-ai/omnigent/issues/1781) codex harness: ambient DATABRICKS_BEARER/DATABRICKS_TOKEN overrides pr |
+| 115 | 46 | medium | P2 | P2 | +154 | [#1594](https://github.com/omnigent-ai/omnigent/issues/1594) Server-side idempotency for external_conversation_item (safe dedup on  |
+| 116 | 46 | medium | P2 | P2 | +165 | [#1230](https://github.com/omnigent-ai/omnigent/issues/1230) [Feature] Migrate remaining native forwarders to the shared post_sessi |
+| 117 | 46 | medium | P1 | P2 ⚑ | +2 | [#1128](https://github.com/omnigent-ai/omnigent/issues/1128) [Bug] Claude SDK Appears to Use Opus Instead of Selected Model |
+| 118 | 46 | medium | P2 | P2 | +199 | [#548](https://github.com/omnigent-ai/omnigent/issues/548) Recommend missing dependency install suggestions more gracefully in UI |
+| 119 | 46 | medium | P1 | P2 ⚑ | +11 | [#241](https://github.com/omnigent-ai/omnigent/issues/241) pi harness: GPT and Gemini dispatches 404 on the Databricks ucode gate |
+| 120 | 46 | medium | P3 | P2 ⚑ | +227 | [#147](https://github.com/omnigent-ai/omnigent/issues/147) Tracking: gradual decomposition of monolith modules (cli.py 9.1KLOC, c |
+| 121 | 46 | medium | P1 | P2 ⚑ | -1 | [#1113](https://github.com/omnigent-ai/omnigent/issues/1113) Native sub-agent/runner failures surface as bare "failed" with no reas |
+| 122 | 42 | medium | P2 | P2 | +16 | [#3969](https://github.com/omnigent-ai/omnigent/issues/3969) Databricks gateway sessions default to a stale model (opus-4-7) while  |
+| 123 | 42 | medium | P1 | P2 ⚑ | -105 | [#3790](https://github.com/omnigent-ai/omnigent/issues/3790) force_sandbox policy is evaluated but structurally unreachable from cl |
+| 124 | 42 | medium | P1 | P2 ⚑ | -84 | [#3236](https://github.com/omnigent-ai/omnigent/issues/3236) web_search: bare executor.model strings are inferred as provider 'open |
+| 125 | 42 | medium | P1 | P2 ⚑ | -61 | [#2630](https://github.com/omnigent-ai/omnigent/issues/2630) Tool-spawn failure is swallowed — agent answers from training knowledg |
+| 126 | 42 | medium | P2 | P2 | +132 | [#1724](https://github.com/omnigent-ai/omnigent/issues/1724) codex-native harness times out on WSL2 ("Codex TUI never started a thr |
+| 127 | 42 | medium | P1 | P2 ⚑ | -12 | [#1533](https://github.com/omnigent-ai/omnigent/issues/1533) Context-occupancy meter (context_tokens) freezes on failed turns — onl |
+| 128 | 42 | medium | P1 | P2 ⚑ | -70 | [#2904](https://github.com/omnigent-ai/omnigent/issues/2904) [Bug] claude-native: web-UI chat input fails with "tmux command failed |
+| 129 | 42 | medium | P2 | P2 | +65 | [#2880](https://github.com/omnigent-ai/omnigent/issues/2880) [Feature] Add in-session revert mechanism for all interfaces  |
+| 130 | 42 | medium | P1 | P2 ⚑ | -69 | [#2812](https://github.com/omnigent-ai/omnigent/issues/2812) [Bug] serve-mcp stops answering stdio requests during a slow tool call |
+| 131 | 42 | medium | P1 | P2 ⚑ | -50 | [#2397](https://github.com/omnigent-ai/omnigent/issues/2397) [Bug] Codex-native intelligent routing ignores live effort capabilitie |
+| 132 | 42 | medium | P1 | P2 ⚑ | -45 | [#2272](https://github.com/omnigent-ai/omnigent/issues/2272) [Bug] Codex runner can't find OpenRouter secret that exists in keyring |
+| 133 | 42 | medium | P2 | P2 | +171 | [#890](https://github.com/omnigent-ai/omnigent/issues/890) [Bug] omnigent setup fails with npm EACCES when installing the Claude  |
+| 134 | 42 | medium | P1 | P2 ⚑ | -9 | [#668](https://github.com/omnigent-ai/omnigent/issues/668) [Bug] BUG？omni claude times out (60s) on macOS with native Claude Code |
+| 135 | 40 | medium | P1 | P2 ⚑ | -93 | [#3101](https://github.com/omnigent-ai/omnigent/issues/3101) Docker/Kubernetes entrypoint never wires project_store — first-class P |
+| 136 | 39 | medium | P1 | P2 ⚑ | -23 | [#1551](https://github.com/omnigent-ai/omnigent/issues/1551) opencode-native: blocking question tool not surfaced to web (no elicit |
+| 137 | 38 | medium | P2 | P2 | +2 | [#3950](https://github.com/omnigent-ai/omnigent/issues/3950) An agent switch keeps the previous agent's comment-tool relay |
+| 138 | 38 | medium | P1 | P2 ⚑ | -122 | [#3852](https://github.com/omnigent-ai/omnigent/issues/3852) [Bug] Built-in write policies miss Claude Code's `MultiEdit` / `Notebo |
+| 139 | 38 | medium | P1 | P2 ⚑ | -113 | [#3530](https://github.com/omnigent-ai/omnigent/issues/3530) [Bug] An agent spec's `instructions:` has no effect on 13 of 24 harnes |
+| 140 | 38 | medium | P1 | P2 ⚑ | -113 | [#3525](https://github.com/omnigent-ai/omnigent/issues/3525) Sub-agent sessions are launched from the parent agent's bundle root, e |
+| 141 | 38 | medium | P2 | P2 | +83 | [#2369](https://github.com/omnigent-ai/omnigent/issues/2369) [Bug] pi harness only lists databricks-claude-sonnet-4-6 |
+| 142 | 38 | medium | P1 | P2 ⚑ | -56 | [#2299](https://github.com/omnigent-ai/omnigent/issues/2299) [Bug] claude-native resume transcripts flatten tool_result image block |
+| 143 | 38 | medium | P2 | P2 | +78 | [#2390](https://github.com/omnigent-ai/omnigent/issues/2390) Builtin policy for per-user sub-agent access control (subagent_access_ |
+| 144 | 38 | medium | P1 | P2 ⚑ | -35 | [#1794](https://github.com/omnigent-ai/omnigent/issues/1794) Bundled Polly: claude-sdk brain "Not logged in" + runaway spawn loop o |
+| 145 | 38 | medium | P1 | P2 ⚑ | -34 | [#1694](https://github.com/omnigent-ai/omnigent/issues/1694) Reliability: parallel code-fix missions fail silently (5s tmux timeout |
+| 146 | 38 | medium | P2 | P2 | +182 | [#152](https://github.com/omnigent-ai/omnigent/issues/152) Harness availability is reported from binary presence, not from config |
+| 147 | 36 | medium | P2 | P2 | -13 | [#4009](https://github.com/omnigent-ai/omnigent/issues/4009) [Feature] No Go client for the session API, so every Go caller hand-ro |
+| 148 | 36 | medium | P1 | P2 ⚑ | -135 | [#3898](https://github.com/omnigent-ai/omnigent/issues/3898) [Bug] Pack function policies fail server-side input evaluation unless  |
+| 149 | 36 | medium | P1 | P2 ⚑ | -135 | [#3870](https://github.com/omnigent-ai/omnigent/issues/3870) child-session creation returns 500 internal_error, breaking Polly/Debb |
+| 150 | 36 | medium | P2 | P2 | -8 | [#3864](https://github.com/omnigent-ai/omnigent/issues/3864) [Bug] to_api_dict() drops ConversationItem.created_at, so flat items A |
+| 151 | 36 | medium | P1 | P2 ⚑ | -136 | [#3863](https://github.com/omnigent-ai/omnigent/issues/3863) [Bug] Databricks Apps entrypoint never wires project_store — Projects  |
+| 152 | 36 | medium | P2 | P2 | 0 | [#3563](https://github.com/omnigent-ai/omnigent/issues/3563) [Bug] Host-bound resume into a deleted workspace: host computes the ex |
+| 153 | 36 | medium | P2 | P2 | +2 | [#3550](https://github.com/omnigent-ai/omnigent/issues/3550) [Bug] Missing signing alg's prevent using some OIDC providers |
+| 154 | 36 | medium | P2 | P2 | +6 | [#3435](https://github.com/omnigent-ai/omnigent/issues/3435) [Feature] Admin server-wide usage report (per-user and per-model cost) |
+| 155 | 36 | medium | P2 | P2 | +7 | [#3368](https://github.com/omnigent-ai/omnigent/issues/3368) Feature: first-class async write-safety (freeze → approve → apply) pri |
+| 156 | 36 | medium | P2 | P2 | +9 | [#3352](https://github.com/omnigent-ai/omnigent/issues/3352) [Feature] OpenClaw onboarding — Option B: chat import (SQLite session  |
+| 157 | 36 | medium | P2 | P2 | +13 | [#3247](https://github.com/omnigent-ai/omnigent/issues/3247) credential_proxy: re-resolve the source on 401 / expiry (short-lived t |
+| 158 | 36 | medium | P1 | P2 ⚑ | -98 | [#2854](https://github.com/omnigent-ai/omnigent/issues/2854) [Bug] Cross-harness `harness_override` is ignored on the `initial_item |
+| 159 | 36 | medium | P2 | P2 | +37 | [#2851](https://github.com/omnigent-ai/omnigent/issues/2851) Policy-supplied targets for ASK approval cards |
+| 160 | 36 | medium | P2 | P2 | +42 | [#2756](https://github.com/omnigent-ai/omnigent/issues/2756) Expose atomic session-event admission to integrations |
+| 161 | 36 | medium | P2 | P2 | +51 | [#2577](https://github.com/omnigent-ai/omnigent/issues/2577) [Feature] Manage OIDC/SSO admins from an id_token claim (IdP group/rol |
+| 162 | 36 | medium | P1 | P2 ⚑ | -92 | [#2539](https://github.com/omnigent-ai/omnigent/issues/2539) Named sys_session_send returns 404 after first child from a bundled se |
+| 163 | 36 | medium | P1 | P2 ⚑ | -92 | [#2524](https://github.com/omnigent-ai/omnigent/issues/2524) [Bug] Registering remote host fails |
+| 164 | 36 | medium | P1 | P2 ⚑ | -91 | [#2444](https://github.com/omnigent-ai/omnigent/issues/2444) Accounts JWT expiry falls through to Databricks auth and breaks persis |
+| 165 | 36 | medium | P2 | P2 | +55 | [#2404](https://github.com/omnigent-ai/omnigent/issues/2404) fix(runtime): orphan sweep can abort startup on unreadable shared-host |
+| 166 | 36 | medium | P2 | P2 | +56 | [#2374](https://github.com/omnigent-ai/omnigent/issues/2374) Proposal: per-turn context_providers to augment system instructions at |
+| 167 | 36 | medium | P1 | P2 ⚑ | -82 | [#2304](https://github.com/omnigent-ai/omnigent/issues/2304) Runner subprocess inherits host daemon cwd, causing os_env cwd resolut |
+| 168 | 36 | medium | P2 | P2 | +66 | [#2070](https://github.com/omnigent-ai/omnigent/issues/2070) [Feature] sys_os_* file tools are hard-confined to the session workspa |
+| 169 | 36 | medium | P2 | P2 | +83 | [#1816](https://github.com/omnigent-ai/omnigent/issues/1816) `omni run <agent.yaml> --harness opencode` rejects the agent bundle (T |
+| 170 | 36 | medium | P2 | P2 | +101 | [#1526](https://github.com/omnigent-ai/omnigent/issues/1526) Refactor: incrementally decompose the 4 god-files (sessions.py, runner |
+| 171 | 36 | medium | P2 | P2 | +103 | [#1411](https://github.com/omnigent-ai/omnigent/issues/1411) Standalone reusable MCP servers: CRUD + connection verify (list tools) |
+| 172 | 36 | medium | P1 | P2 ⚑ | -55 | [#1158](https://github.com/omnigent-ai/omnigent/issues/1158) [Bug] antigravity-native: TUI-typed turns never mirror to the web UI ( |
+| 173 | 36 | medium | P2 | P2 | +112 | [#1157](https://github.com/omnigent-ai/omnigent/issues/1157) [Bug] antigravity-native: no Chat/Terminal toggle — terminal_antigravi |
+| 174 | 36 | medium | P2 | P2 | +116 | [#1075](https://github.com/omnigent-ai/omnigent/issues/1075) [Feature] Support AWS Lambda / Firecracker microVMs as managed sandbox |
+| 175 | 36 | medium | P2 | P2 | +117 | [#1055](https://github.com/omnigent-ai/omnigent/issues/1055) [Test] End-to-end OTel test against a real collector to lock in the BY |
+| 176 | 36 | medium | P2 | P2 | +117 | [#1054](https://github.com/omnigent-ai/omnigent/issues/1054) [Feature] Record gen_ai.retry events on llm_call spans |
+| 177 | 36 | medium | P2 | P2 | +120 | [#1031](https://github.com/omnigent-ai/omnigent/issues/1031) [Feature] Support serving the standalone Web UI under a subpath, e.g.  |
+| 178 | 36 | medium | P2 | P2 | +122 | [#983](https://github.com/omnigent-ai/omnigent/issues/983) Session sharing ergonomics: `sys_session_share` agent tool + `omnigent |
+| 179 | 36 | medium | P2 | P2 | +129 | [#857](https://github.com/omnigent-ai/omnigent/issues/857) [Proposal] Usage-limit detection + on-429 failover across pooled provi |
+| 180 | 36 | medium | P1 | P2 ⚑ | -56 | [#765](https://github.com/omnigent-ai/omnigent/issues/765) Support interactive mid-flight policy ASK (TOOL_CALL/TOOL_RESULT/OUTPU |
+| 181 | 36 | medium | P1 | P2 ⚑ | -52 | [#522](https://github.com/omnigent-ai/omnigent/issues/522) Implement async-tool completion auto-delivery (SESSION_REARCHITECTURE  |
+| 182 | 36 | medium | P2 | P2 | +136 | [#509](https://github.com/omnigent-ai/omnigent/issues/509) [Feature] Default new-session workspace from selected agent's cwd |
+| 183 | 36 | medium | P2 | P2 | +140 | [#382](https://github.com/omnigent-ai/omnigent/issues/382) Evaluating the same agent across harnesses: no built-in way to compare |
+| 184 | 36 | feature | P2 | P2 | +57 | [#2003](https://github.com/omnigent-ai/omnigent/issues/2003) [Feature] Pluggable terminal multiplexer backend (tmux / herdr / zelli |
+| 185 | 36 | feature | P2 | P2 | +128 | [#692](https://github.com/omnigent-ai/omnigent/issues/692) Polly: fan out sub-agent work across multiple concurrent claude profil |
+| 186 | 36 | feature | P2 | P2 | +141 | [#197](https://github.com/omnigent-ai/omnigent/issues/197) Declarative skill sources: pull Claude Code skills + their dependency  |
+| 187 | 35 | medium | P1 | P2 ⚑ | -124 | [#2702](https://github.com/omnigent-ai/omnigent/issues/2702) Native idle-detection fork+exec's tmux capture-pane at 5 Hz per termin |
+| 188 | 35 | medium | P2 | P2 | +49 | [#2055](https://github.com/omnigent-ai/omnigent/issues/2055) [Bug] codex-native harness elicitation: a resolve landing in the betwe |
+| 189 | 35 | medium | P1 | P2 ⚑ | -145 | [#3076](https://github.com/omnigent-ai/omnigent/issues/3076) [Bug] claude-sdk omits ToolSearch, eagerly loading every MCP schema |
+| 190 | 35 | medium | P3 | P2 ⚑ | +149 | [#2800](https://github.com/omnigent-ai/omnigent/issues/2800) [Bug] Top-level custom codex-native agents drop reasoning effort and y |
+| 191 | 35 | medium | P1 | P2 ⚑ | -68 | [#880](https://github.com/omnigent-ai/omnigent/issues/880) [BUG] Native harness (omnigent claude): assistant turns not streamed t |
+| 192 | 34 | medium | P1 | P2 ⚑ | -114 | [#2429](https://github.com/omnigent-ai/omnigent/issues/2429) Server (python -m omnigent.cli server) CPU-spins indefinitely with no  |
+| 193 | 33 | feature | P2 | P2 | +32 | [#2303](https://github.com/omnigent-ai/omnigent/issues/2303) [Feature] Support multi-repo workspaces (nested Git repos or multiple  |
+| 194 | 33 | medium | P1 | P2 ⚑ | -188 | [#3981](https://github.com/omnigent-ai/omnigent/issues/3981) [Bug] Desktop: Workspace rail resize is unusable on the Browser tab; a |
+| 195 | 33 | medium | P2 | P2 | -52 | [#3861](https://github.com/omnigent-ai/omnigent/issues/3861) [Bug] omni host status renders URLs so terminals link the whole status |
+| 196 | 33 | medium | P2 | P2 | -43 | [#3561](https://github.com/omnigent-ai/omnigent/issues/3561) [Bug] `prompt_policy` never sends `_CLASSIFIER_SCHEMA` to the LLM — st |
+| 197 | 33 | medium | none | P2 | +156 | [#3402](https://github.com/omnigent-ai/omnigent/issues/3402) [Bug] Label seeding and session-state writes race under concurrent upd |
+| 198 | 33 | medium | P2 | P2 | -22 | [#3219](https://github.com/omnigent-ai/omnigent/issues/3219) [Bug] Cmd/Ctrl+Up/Down session traversal stops in an empty focused com |
+| 199 | 33 | medium | P2 | P2 | -7 | [#2921](https://github.com/omnigent-ai/omnigent/issues/2921) Font settings: selected font (incl. Nerd Fonts) never loads — no webfo |
+| 200 | 33 | medium | P2 | P2 | -2 | [#2848](https://github.com/omnigent-ai/omnigent/issues/2848) Server logs an expected offline-runner resource 503 as ERROR + full tr |
