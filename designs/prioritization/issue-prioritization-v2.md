@@ -8,7 +8,7 @@ de-facto binary); it neither reflects how bad an issue is nor how many users it
 hits, and it doesn't move over time. This proposal keeps the working
 [triage pipeline](../issue-triage-proposal.md) and adds: a re-calibrated
 priority rubric (severity graded across all buckets, for FRs too), independent
-scoring axes (severity × reach × harness-tier × readiness + demand, with
+scoring axes (severity × reach × component-weight × readiness + demand, with
 duplicate count as a reach signal), a maintainer-facing ranked view, and
 re-gradable severity as the mechanism to nudge ranking over time. Because
 priority is now a *computed* label, a firm rule runs through the whole design:
@@ -97,10 +97,10 @@ are distinct and it's worth being precise:
 1. **Severity** — a graded property of the issue, a function of the axes below
    (type, blast radius, component weight, …). Scored `low / medium / high /
    critical = 10 / 30 / 60 / 100`.
-2. **Score** — severity combined with the mechanical multipliers (reach, tier,
-   readiness, dup, demand). This is the **continuous ordering** — it sorts
-   issues *within and across* priority labels, so two issues that share a label
-   aren't stuck equal.
+2. **Score** — severity combined with the mechanical multipliers (reach,
+   component weight, readiness, dup, demand). This is the **continuous
+   ordering** — it sorts issues *within and across* priority labels, so two
+   issues that share a label aren't stuck equal.
 3. **Priority label (the outcome)** — the human-facing bucket the score lands
    in, **by fixed score thresholds** (below). This is what maintainers **sort,
    filter, and action on**; the score is the *reference for why* an issue got
@@ -235,10 +235,9 @@ What moves, and why:
 | P2 → P0 | 10 | #2125 multi-host git creds — credential-crossing, weight-1.4 area (score 161) |
 | P1 → P3 | 6 | #3980 desktop dialog paint-over — minor, single-platform (score 25) |
 
-*Caveat:* these per-issue moves use the regex grader, so they inherit its known
-false positives (e.g. #2057/#2054 "sandbox bypass" FRs wrongly reach P0). Read
-the **aggregate shape** (60% → 27%) as the reliable signal and individual rows
-as illustrative; the LLM backfill corrects the outliers.
+*Caveat:* these moves use the regex grader, so read the **aggregate shape**
+(60% → 27%) as reliable and individual rows as illustrative — the regex's known
+false positives (see Dry-run) are what the LLM backfill corrects.
 
 ### Axis 3 — Component weight (unified; was harness-only)
 
@@ -376,12 +375,10 @@ lower, so it sits deep in the queue.
 Same five data points, opposite ends of the queue *and* opposite priority
 labels: that's the score→label derivation doing the work.
 
-**Why severity is LLM-graded, not label-derived:** the dry-run
-(`score_prototype.py`) grades severity with regex for reproducibility, and it
-demonstrates *why regex isn't enough in production* — "sandbox **bypass**" in an
-FR title falsely scored two Codex-mode FRs (#2057, #2054) as critical, and a bot
-"Code Audit" issue (#61) too. The production grader is the triage classifier,
-which reads full content and already runs per issue at zero extra cost.
+**Severity is LLM-graded in production, not regex.** The dry-run uses regex only
+so it's reproducible; the real grader is the triage classifier, which reads full
+content at zero extra cost. The regex's own false positives are the argument for
+this — see the Dry-run section.
 
 ### Community demand — used, but type-dependent and bounded
 
@@ -562,37 +559,34 @@ Selected results (360 open issues; rank out of 360, lower = higher priority):
 
 | Issue | Before | After | Δ | Note |
 |---|---|---|---|---|
-| #3557 policy-gate bypass (P0) | 1 | 6 | −5 | Real P0 stays near top ✅ |
-| #3265 claude-sdk bwrap spawn death (P1) | 37 | 3 | +34 | High-sev, tier-1 harness, has repro ✅ |
-| #3270 sub-agent sessions absent (P1) | 35 | 7 | +28 | ✅ |
-| #2421 codex MCP bridge child leak (P1) | 80 | 27 | +53 | Resource leak, tier-1 ✅ |
-| #2454 unbounded ~/.omnigent growth (P1) | 72 | 26 | +46 | ✅ |
+| #3557 policy-gate bypass (P0) | 1 | 10 | −9 | Real P0 stays near top ✅ |
+| #3265 claude-sdk bwrap spawn death (P1) | 37 | 6 | +31 | High-sev, weight-1.4 harness, broad reach ✅ |
+| #3270 sub-agent sessions absent (P1) | 35 | 9 | +26 | ✅ |
+| #2421 codex MCP bridge child leak (P1) | 80 | 36 | +44 | Resource leak, weight-1.4 ✅ |
+| #2454 unbounded ~/.omnigent growth (P1) | 72 | 35 | +37 | ✅ |
 
 **Community demand lifts wanted FRs — bounded, so bugs stay on top:**
 
 | Issue | 👍 | Before | After | Δ | Note |
 |---|---|---|---|---|---|
-| #1021 GitHub Copilot as provider (FR) | 10 | 299 | 92 | +207 | Most-wanted FR climbs; demand alone pushed it up ✅ |
-| #16 native Windows support (FR) | 6 | 334 | 32 | +302 | High demand + graded P1 (whole platform) ✅ |
-| #888 side-by-side multi-session (FR) | 2 | 305 | 30 | +275 | ✅ |
+| #16 native Windows support (FR) | 6 | 334 | 7 | +327 | Whole-platform reach + demand → graded P0 ✅ |
+| #1021 GitHub Copilot as provider (FR) | 10 | 299 | 93 | +206 | Most-reacted FR climbs on demand alone ✅ |
+| #888 side-by-side multi-session (FR) | 2 | 305 | 44 | +261 | ✅ |
 
-**Dry-run limits — the evidence that severity must be LLM-graded, not regex:**
+**Dry-run limits — the evidence that severity must be LLM-graded, not regex.**
+The regex grader mis-scores three ways, and all three are visible near the top,
+which is exactly why production grades with the classifier:
 
-| Issue | Before | After | Note |
-|---|---|---|---|
-| #2057 / #2054 Codex-mode FRs | 236/238 | 1/2 | **False positive** — "sandbox bypass" in the FR body tripped the critical regex. An LLM reads that it's *proposing* a mode, not reporting a bypass. |
-| #61 bot "Code Audit" (P3) | 349 | 19 | **False positive** — a bot audit issue mentioning "security". LLM grader avoids. |
-| #2125 multi-host git creds (P2, FR) | 232 | 8 | **Lucky match** — the body literally says "your GitHub PAT is offered to the self-hosted remote", so the regex hits a credential-leak pattern and scores it critical. Right answer, wrong reason: it's an exact-phrase fluke, not comprehension. An LLM would grade it high because it *understands* the credential-crossing risk. |
+| Issue | After | Failure |
+|---|---|---|
+| #2057 / #2054 Codex-mode FRs | 2 / 3 | **False positive** — "sandbox bypass" in the FR body trips the critical regex; an LLM reads that they *propose* a mode, not report a bypass. |
+| #61 bot "Code Audit" (P3) | 15 | **False positive** — a bot audit issue mentioning "security". |
+| #2125 multi-host git creds (FR) | 1 | **Lucky match** — body literally says "your GitHub PAT is offered to the self-hosted remote", so the regex hits a credential pattern. Right answer, wrong reason: an LLM would grade it critical because it *understands* the credential-crossing, not on an exact phrase. |
 
-#2125 makes the point either way: the earlier draft's regex *missed* it (false
-negative); a one-word regex tweak now *over-*hits it. Both are the same lesson —
-regex can't reason about severity, so production must grade with the LLM.
-
-**Takeaways for the real build:**
-- The score *mechanics* order the queue far better than the priority label.
-- The severity *grader* must be the LLM, not regex — the dry-run's false
-  positives *and* its lucky matches are both the proof.
-- Weights are defensible starting points; tune against this before→after table.
+**Takeaway:** the score *mechanics* order the queue far better than the label;
+the severity *grader* must be the LLM (its regex false positives *and* lucky
+matches both prove it); weights are defensible starting points — tune against
+this table.
 
 ---
 
@@ -602,8 +596,8 @@ The bug template asks Version + OS but both optional → sparse. Add structured,
 **dropdown** fields (dropdowns beat free-text for scoring signal):
 
 - **Harness** (dropdown: claude / codex / cursor / … / n/a) **+ mode (SDK /
-  native)** — the #1 component, currently buried in prose. Feeds tier directly;
-  the SDK-vs-native split feeds `sub_area` (per review).
+  native)** — the #1 component, currently buried in prose. Feeds the component
+  weight directly; the SDK-vs-native split feeds `sub_area` (per review).
 - **Platform / device** (dropdown: macOS / Linux / Windows / **desktop /
   mobile-iOS / mobile-Android** / Docker) — a whole class of bugs is
   platform-specific (Windows setup crashes, iOS/Android OIDC, Linux aarch64).
@@ -618,32 +612,24 @@ dropdowns cost the reporter nothing and sharpen severity × reach.
 
 ### Sandbox / security deserves its own treatment
 
-You flagged sandboxing as its own category — the data agrees. Across open
-issues: **63 mention sandbox** (bwrap/seatbelt/egress), **70 policy/guardrail**,
-**120 credential/secret**. The top P0
-([#3557](https://github.com/omnigent-ai/omnigent/issues/3557)) is a
-shell-surface policy-gate *bypass*; #2125 is a credential-crossing risk. These
-aren't ordinary bugs — a sandbox escape or policy bypass is a **security
-severity**, not a functional one.
-
-Two concrete changes:
-
-- **Component:** promote `sandbox` to its own `comp:sandbox` label (today it
-  collapses into `comp:runner`); `policies` already has `comp:policies`. See
-  "Component taxonomy" above for the full rationale.
-- **Severity:** the rubric's P0 row explicitly names "security/policy/sandbox
-  bypass," and the grader should treat *escape / bypass / credential-crossing*
-  as top-tier severity regardless of reach — a one-user sandbox escape is still
-  P0. This is the one place reach does **not** gate priority.
+Sandbox/security is a distinct category, and the data agrees: **63** open issues
+mention sandbox (bwrap/seatbelt/egress), **70** policy/guardrail, **120**
+credential/secret; the top P0 (#3557) is a policy-gate *bypass*. A sandbox escape
+or policy bypass is a **security** severity, not a functional one, and the design
+handles it in two places: the `comp:sandbox` label (Component taxonomy) and the
+P0 rubric's "security escape" row (Axis 2), where *escape / bypass /
+credential-crossing* is top-tier **regardless of reach** — the one place reach
+does not gate priority.
 
 ---
 
 ## Rollout
 
-**Status: none of this is built yet.** This PR is the design + a dry-run
-prototype only — no labels are created, `areas.json` is unchanged, and the
-classifier config is untouched. The steps below are the implementation plan,
-each intended as its own follow-up PR (tracked as separate issues).
+**Status: mostly design + prototype.** This PR adds the design doc, the dry-run
+prototype, and the per-area `weight`/`weight_source` fields in `areas.json` (with
+a test). It does **not** create any `comp:*` labels or wire `areas.json` into the
+live classifier. The steps below are the implementation plan, each intended as
+its own follow-up PR.
 
 1. **Prompt re-calibration** (`.github/triage/config.yaml`) — new priority
    rubric (grade FRs across buckets; explicit P0 list; tier-1 floor) + the "P1
