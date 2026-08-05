@@ -10,7 +10,9 @@ hits, and it doesn't move over time. This proposal keeps the working
 priority rubric (severity graded across all buckets, for FRs too), independent
 scoring axes (severity × reach × harness-tier × readiness + demand, with
 duplicate count as a reach signal), a maintainer-facing ranked view, and
-re-gradable severity as the mechanism to nudge ranking over time.
+re-gradable severity as the mechanism to nudge ranking over time. Because
+priority is now a *computed* label, a firm rule runs through the whole design:
+**a human-set priority always wins — no bot job overwrites it.**
 
 This is an evolution of, not a replacement for,
 [issue-triage-proposal.md](../issue-triage-proposal.md). The intake, the
@@ -194,7 +196,9 @@ no second rubric to keep in sync. It runs in two situations:
 1. **One-time backfill.** Re-run the classifier over the existing open issues
    once, so the backlog reflects the new rubric on day one. This is a labels-only
    pass — same tool-less classifier, same trusted label-application steps as
-   [Stage 2 triage](../issue-triage-proposal.md); nothing new to build.
+   [Stage 2 triage](../issue-triage-proposal.md); nothing new to build. It sets
+   priority only where none exists or where the bot set the prior value, honoring
+   the human-override guard below.
 2. **Ongoing, on demand.** A maintainer who disagrees just changes the label
    (P2 → P1, or the reverse). That *is* the bump mechanism — no separate pin
    lever (see "Ongoing adjustment"). The scheduled re-score reads the updated
@@ -427,6 +431,41 @@ just **re-grading severity** — the same field the classifier already sets:
    #2125) is upstream — grade severity honestly (Axis 2); the score reads
    severity, so fixing severity fixes the order.
 
+#### Human priority always wins — the bot must not overwrite it
+
+Now that priority is a *computed* label, any job that writes it (the one-time
+backfill, the weekly re-score) could clobber a maintainer's deliberate
+`P0 → P2` or `P3 → P1`. That must never happen. The rule:
+
+> **A bot-written priority is a default; a human-written priority is a
+> decision. The bot only ever sets priority on an issue it hasn't set before,
+> and never overwrites a value a human changed.**
+
+Concretely, on top of today's `on: [opened]` triage (which already never
+re-fires on edits), the re-score/backfill jobs must:
+
+- **Detect the human edit.** An issue is "human-owned" for priority if its
+  current `P*` label differs from what the bot last wrote. The cheapest durable
+  record is a hidden marker the bot leaves when it labels — e.g. a
+  `bot-priority:P2` shadow label (or a one-line machine-readable note in a
+  pinned tracking comment). If `current P* != bot-priority:*`, a human moved it
+  → **skip**. (GitHub's issue-events API also records who set a label and
+  whether the actor is the bot, as a fallback signal.)
+- **Only fill, never replace.** If an issue has *no* priority label, the job may
+  set one. If it already has one the bot itself last wrote, the job may update
+  it (the grade legitimately changed). If a human wrote it, the job leaves the
+  label alone and may at most *surface disagreement* — e.g. list "human P2, bot
+  would say P0" in the ranked view for a maintainer to reconsider, without
+  touching the label.
+- **Re-score reads, doesn't write, human-owned rows.** The weekly ranked view
+  sorts by the computed score for visibility, but the *authoritative label* on a
+  human-owned issue is the human's. The score can still order it in the list;
+  it just can't relabel it.
+
+This keeps the automation as a labor-saver, not an authority: the bot triages
+the long tail, humans override the ones that matter, and the override sticks
+across every subsequent re-score.
+
 #### Maintainer guide — hand-correcting the ranking
 
 The goal is a ranking good enough that **hand-correction is the exception, not
@@ -434,9 +473,10 @@ the process** — a working target is **≤10% of issues touched**. If you're
 correcting more than that, the fix isn't more editing, it's tuning the prompt or
 weights (below). Two properties make correction cheap and safe:
 
-- **Corrections are sticky.** Triage runs `on: issues [opened]` only — it never
-  re-fires on edits, so a label you change by hand is never overwritten by the
-  bot. (The weekly re-score only *reads* labels; it doesn't re-grade.)
+- **Corrections are sticky.** Two layers guarantee this: initial triage runs
+  `on: issues [opened]` only (never re-fires on edits), and the re-score/backfill
+  jobs honor the human-override guard above — a priority a human changed is never
+  overwritten, only surfaced as disagreement if the bot would grade it otherwise.
 - **One knob.** You change the **priority label** (the field the classifier
   emits). The score is a pure function of it plus mechanical factors — no
   separate override to learn.
@@ -591,11 +631,13 @@ Two concrete changes:
    Auth-type dropdowns.
 4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
    that reads LLM-graded severity + readiness + dup count and publishes the
-   ranked view.
+   ranked view. **Must implement the human-override guard** (write a
+   `bot-priority:*` shadow label; skip any issue whose `P*` a human changed).
 5. **One-time backfill (regrade)** — re-run the classifier over open issues to
    relabel under the new rubric (see "How regrading works"); preview with
-   `score_prototype.py --regrade`. Target: P1 back under ~20% of open bugs
-   (regex preview lands it at 22%; the LLM pass should do better).
+   `score_prototype.py --regrade`. Sets priority only where none exists or the
+   bot set the prior value — never over a human edit. Target: P1 back under ~20%
+   of open bugs (regex preview lands it at 22%; the LLM pass should do better).
 6. **Consume dedup output** — once [#4037](https://github.com/omnigent-ai/omnigent/pull/4037)
    lands, feed duplicate count into `dup_reach`; wire the unused `good first
    issue` funnel.
