@@ -618,6 +618,11 @@ Two concrete changes:
 
 ## Rollout
 
+**Status: none of this is built yet.** This PR is the design + a dry-run
+prototype only — no labels are created, `areas.json` is unchanged, and the
+classifier config is untouched. The steps below are the implementation plan,
+each intended as its own follow-up PR (tracked as separate issues).
+
 1. **Prompt re-calibration** (`.github/triage/config.yaml`) — new priority
    rubric (grade FRs across buckets; explicit P0 list; tier-1 floor) + the "P1
    scarcity" guardrail + emit `severity`, `readiness`, and `sub_area` fields.
