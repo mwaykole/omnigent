@@ -155,23 +155,6 @@ def severity(i):
     return ("medium", 25) if "Bug" in labels(i) else ("feature", 20)
 
 
-_BROAD_REACH = re.compile(
-    r"\ball (?:users|sessions|platforms)|every (?:user|session|request)"
-    r"|any harness|default config"
-)
-
-
-def reach(i):
-    text = (i["title"] + " " + (i.get("body") or ""))[:1500].lower()
-    if _BROAD_REACH.search(text):
-        return 1.5
-    if re.search(
-        r"\bwindows|\bios\b|\bandroid|\blinux|\baarch64|\bmacos|\belectron|\bself.host", text
-    ):
-        return 0.9  # platform-specific: real, but narrower blast radius
-    return 1.0
-
-
 def area_weight(i):
     """Unified component-importance multiplier from areas.json `weight`.
 
@@ -243,22 +226,27 @@ def dup_reach(i):
     return 1.0 + min(0.5, 0.15 * n)  # +15% per dup, capped at +50%
 
 
-# Age is NEUTRAL by default (design review: an unfixed old bug isn't less
-# important — if anything it should escalate, not decay). Set DECAY_OLD=True
-# only to reproduce the earlier decaying variant for comparison.
-DECAY_OLD = False
-
-
+# Age factor (Axis 8): fresh issues are neutral, mid-life issues get a light
+# visibility bump, and long-ignored issues decay (if they mattered, a maintainer
+# bumps priority, which adds far more than this shaves). Age is measured against
+# the snapshot's newest issue (set in main()), not wall-clock, so a stale
+# snapshot doesn't push every row into the old bucket.
 def age_factor(i):
-    if not DECAY_OLD:
-        return 1.0
     a = age_days(i)
-    return 1.0 if a < 30 else max(0.7, 1.0 - (a - 30) / 200)
+    if a <= 5:
+        return 1.0
+    if a <= 21:
+        return 1.2
+    return 0.8
 
 
 def score(i):
     sname, sw = severity(i)
-    s = sw * reach(i) * area_weight(i) * dup_reach(i) * readiness(i)
+    # Reach (blast radius) is folded INTO the severity grade, not a separate
+    # multiplier: in production the LLM grades a widespread failure higher. The
+    # regex stand-in can't make that judgment, so broad-reach issues are
+    # under-graded here — one more reason production severity must be LLM-graded.
+    s = sw * area_weight(i) * dup_reach(i) * readiness(i)
     d = _demand_signal(i)
     if "enhancement" in labels(i):
         s *= 1.0 + FR_DEMAND_MAX * d  # demand LEADS for feature requests
@@ -380,6 +368,12 @@ def main():
     with open(path) as f:
         data = json.load(f)
     opn = [i for i in data if i.get("pull_request") is None and i["state"] == "open"]
+
+    # Anchor age to the snapshot's newest issue, not wall-clock: the age factor
+    # (Axis 8) is meaningless if a stale snapshot dumps every issue in the 21d+
+    # bucket. In production the job runs live, so wall-clock is correct there.
+    global NOW
+    NOW = max(parse(i["created_at"]) for i in opn)
 
     if "--regrade" in flags:
         print_regrade(opn)  # priority-label backfill preview
