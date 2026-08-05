@@ -106,7 +106,7 @@ SEVERITY = {
 PRIOS = ("P0-critical", "P1-high", "P2-medium", "P3-low")
 
 # Component importance is one unified axis: a per-area `weight` read from
-# .github/areas.json (bands 1.4/1.1/1.0/0.9), applied to EVERY comp: label —
+# .github/areas.json (bands 1.4/1.2/1.1/1.0/0.9), applied to EVERY comp: label —
 # not the old harness-only tier. Harness weights are telemetry-seeded (session
 # usage); non-harness are editorial. See areas.json `weight` / `weight_source`.
 _AREAS_PATH = os.path.join(os.path.dirname(__file__), "..", "..", ".github", "areas.json")
@@ -191,6 +191,12 @@ DEMAND_CAP = 12  # log input cap so one popular FR can't swamp severity
 FR_DEMAND_MAX = 0.6  # +60% at most for the most-wanted FR
 BUG_DEMAND_MAX = 15  # small flat additive tiebreak for bugs
 
+# Optional modules. Reviewer feedback is to ship the first implementation with
+# readiness and age disabled, but keep them isolated so we can tune/re-enable by
+# changing one constant rather than rewriting the formula.
+ENABLE_READINESS = False
+ENABLE_AGE_FACTOR = False
+
 
 def _demand_signal(i):
     """0..1 normalized, log-scaled reaction intensity."""
@@ -202,9 +208,8 @@ def age_days(i):
     return (NOW - parse(i["created_at"])).total_seconds() / 86400
 
 
-# Readiness: an actionable ticket (repro steps, a real body) is worth surfacing
-# above a vague one at the same severity — you can start on it now. A small
-# multiplier so it only breaks near-ties, never overrides severity.
+# Readiness: optional near-tie module for actionable tickets (repro steps, a
+# real body). Disabled by default in this prototype per reviewer feedback.
 _REPRO = re.compile(r"steps to reproduce|reproduc|to reproduce", re.I)
 READINESS_MIN, READINESS_MAX = 0.85, 1.1
 
@@ -226,11 +231,9 @@ def dup_reach(i):
     return 1.0 + min(0.5, 0.15 * n)  # +15% per dup, capped at +50%
 
 
-# Age factor (Axis 8): fresh issues are neutral, mid-life issues get a light
-# visibility bump, and long-ignored issues decay (if they mattered, a maintainer
-# bumps priority, which adds far more than this shaves). Age is measured against
-# the snapshot's newest issue (set in main()), not wall-clock, so a stale
-# snapshot doesn't push every row into the old bucket.
+# Age factor: optional visibility/decay module. Disabled by default in this
+# prototype per reviewer feedback. Age is measured against the snapshot's newest
+# issue when enabled, so a stale snapshot doesn't push every row into old-age.
 def age_factor(i):
     a = age_days(i)
     if a <= 5:
@@ -246,13 +249,15 @@ def score(i):
     # multiplier: in production the LLM grades a widespread failure higher. The
     # regex stand-in can't make that judgment, so broad-reach issues are
     # under-graded here — one more reason production severity must be LLM-graded.
-    s = sw * area_weight(i) * dup_reach(i) * readiness(i)
+    readiness_factor = readiness(i) if ENABLE_READINESS else 1.0
+    s = sw * area_weight(i) * dup_reach(i) * readiness_factor
     d = _demand_signal(i)
     if "enhancement" in labels(i):
         s *= 1.0 + FR_DEMAND_MAX * d  # demand LEADS for feature requests
     else:
         s += BUG_DEMAND_MAX * d  # demand is only a tiebreak for bugs
-    s *= age_factor(i)
+    if ENABLE_AGE_FACTOR:
+        s *= age_factor(i)
     return s, sname
 
 
@@ -265,10 +270,10 @@ def current_rank_key(i):
 
 # Score → priority label: a single derivation (design decision). The cut-points
 # sit at the severity band values (100 = critical, 60 = high, 25 ≈ medium), so a
-# multiplier (tier/reach/dup/readiness/demand) is what lets an issue cross UP a
+# multiplier (component/dup/demand) is what lets an issue cross UP a
 # band — e.g. a "high" (60) bug in a tier-1 harness (×1.4 = 84) clears P1, while
 # the same bug on a niche harness (×0.9 = 54) stays P2. On today's snapshot this
-# yields P0 9 / P1 58 / P2 206 / P3 87, and a 24% P1 share of open bugs.
+# Re-run this script after changing weights; the appendix is generated from it.
 P0_MIN, P1_MIN, P2_MIN = 100, 60, 25
 
 
@@ -369,9 +374,7 @@ def main():
         data = json.load(f)
     opn = [i for i in data if i.get("pull_request") is None and i["state"] == "open"]
 
-    # Anchor age to the snapshot's newest issue, not wall-clock: the age factor
-    # (Axis 8) is meaningless if a stale snapshot dumps every issue in the 21d+
-    # bucket. In production the job runs live, so wall-clock is correct there.
+    # Keep age deterministic for optional ENABLE_AGE_FACTOR sensitivity runs.
     global NOW
     NOW = max(parse(i["created_at"]) for i in opn)
 

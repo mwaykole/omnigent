@@ -18,7 +18,7 @@
     "               label that does not exist, and there is no label-sync. Several",
     "               areas may share a label (all harness areas share comp:harnesses).",
     "  weight     - importance multiplier for the composite issue-priority score",
-    "               (designs/prioritization). Discrete bands 1.4/1.1/1.0/0.9. Applies",
+    "               (designs/prioritization). Discrete bands 1.4/1.2/1.1/1.0/0.9. Applies",
     "               to EVERY area, harness or not -- it is the unified component-weight",
     "               axis, replacing the harness-only tier. See weight_source.",
     "  weight_source - 'telemetry' (harness areas, seeded from LJ Sessions by Harness)",
