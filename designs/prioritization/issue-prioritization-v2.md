@@ -434,15 +434,98 @@ states and the design treats them differently:
 Today `needs-info` is on **0** open bugs, so the backfill also gives the
 classifier an explicit reason to apply it — only to the incomprehensible ones.
 
+### Surfacing the score — one Databricks job, one scores table
+
+The score must be **computed in exactly one place**, or it drifts between
+whatever recomputes it. That place is a scheduled **Databricks notebook job**,
+not a GitHub Action — because the job sits next to both its input (the synced
+issues table) and its output (the dashboard), so there's no cross-system data
+hop and no second implementation of the formula.
+
+```
+main.team_eng_omnigent.github_issues_bronze   (issues already synced here —
+  │                                             labels, title, body, comments,
+  │                                             reactions in raw_json, created_at)
+  ▼
+[Databricks job: THE one place the score is computed]
+  severity(persisted) × reach × component_weight(areas.json) × dup × readiness
+  │                          + demand ─┐
+  ├──► issue_scores (Delta) ───────────┴──►  dashboard tile: ORDER BY score DESC
+  └──► apply priority/component labels back to GitHub  (needs a write credential)
+```
+
+Concrete facts this rests on (verified against the workspace):
+
+- **Reads are tokenless.** Issues are already ingested into
+  `main.team_eng_omnigent.github_issues_bronze` (with a watermark table driving
+  incremental sync). The job reads that table — **no GitHub token needed to
+  score**. `component_weight` comes from `areas.json`; reactions come from
+  `raw_json`.
+- **Only the write-back needs a credential.** Applying the regraded
+  priority/component labels to GitHub needs a write token — now a **Databricks
+  secret** (a scoped PAT or App-installation token), not a CI secret. Clean
+  split: **compute + dashboard = read-only in Databricks; label writes = the one
+  credentialed step.**
+- **Preserve the prompt-injection boundary.** The Action's security posture
+  (LLM has no tools/shell/token; a trusted step validates output against
+  `ALLOWED_COMPONENTS`/`ALLOWED_PRIORITIES` before any write) **must carry over
+  intact**: the notebook cell holding the GitHub token must not be the context
+  that ran the LLM, and every write stays allowlist-gated. A notebook makes it
+  easy to accidentally hand the token to the model's context — so this is a
+  deliberate structure, not a default.
+- **The bot's own writes lag bronze.** Labels the job writes won't appear in
+  bronze until the next ingestion, so the job can't read its last action back
+  from bronze. It keeps its own `issue_bot_state` Delta table (issue → last
+  bot-written priority/severity) — which is exactly the human-override guard's
+  shadow record, so one table serves both idempotency and override detection.
+- **Trigger cadence — the one open decision.** A notebook job is scheduled
+  (cron), not event-driven, so first-touch triage of a *new* issue waits for the
+  next run (+ ingestion lag) instead of firing in minutes. For scoring /
+  re-score / backfill / dashboard that's inherent and fine. If near-real-time
+  first triage matters, the mitigation is a **thin dispatch Action** (`on:
+  issues [opened]` → trigger the Databricks job) that carries *zero* logic — the
+  formula still lives only in the notebook. Flag for the team: accept ~15–30 min
+  cadence, or keep the dispatcher.
+
+**Linear.** Issues already sync to Linear on a regular cadence, so Linear is an
+existing surface, not something to build. Scores stay in GitHub + the dashboard;
+we do **not** push scores into Linear (it consumes labels/status, it wouldn't
+compute severity×reach anyway). If a Linear-side priority is ever wanted, it
+reads the same `issue_scores` table — never a second computation.
+
+### Determinism — same inputs, same score
+
+The score is a **pure arithmetic function** of its inputs (multiply/add, no
+randomness), so given identical inputs it is byte-for-byte reproducible across
+runs. Two nuances worth stating plainly:
+
+- **Persisted severity is what guarantees it.** The one non-reproducible input
+  would be re-grading severity with the LLM every run (LLM output isn't stable
+  across samples/model versions — it would shuffle dashboard ranks for no
+  reason). Because severity is **graded once at triage and stored** (Rollout
+  step 1), the re-score job reads a fixed value and never re-invokes the model.
+- **The score still moves over time — by design, bounded.** `dup_reach` and
+  `demand` read *current* duplicate and reaction counts, so a well-liked or
+  much-duplicated issue legitimately rises as signal accrues. That's the
+  intended "ranking evolves" behavior, not nondeterminism. (We deliberately
+  removed the one *unwanted* time-drift, age decay, per review.)
+
+**Tie-breaking is deferred.** Scores cluster in coarse bands (many share
+92/84/…); within a tie the order isn't pinned. That's acceptable for now — the
+bands are what matter. When a stable within-band order is wanted, the ranked
+query adds a deterministic tiebreaker (`ORDER BY score DESC, issue_number`); no
+model or scoring change needed.
+
 ### Ongoing adjustment — re-grade severity, don't add a pin lever
 
 Prioritization is not a one-shot classification, but the adjustment lever is
 just **re-grading severity** — the same field the classifier already sets:
 
-1. **Periodic re-score.** A scheduled (weekly) job recomputes the score and
-   posts/updates a single **ranked view** (a pinned issue or generated
-   `PRIORITY-QUEUE.md`), reflecting demand/age/dup changes without re-triaging.
-   No LLM call needed if severity is cached as a field at triage time.
+1. **Periodic re-score.** The scheduled job (below) recomputes the score and
+   refreshes the ranked view / `issue_scores` table, reflecting demand/dup
+   changes without re-triaging. **No LLM call** — it reads the *persisted*
+   severity (Rollout step 1) and does pure arithmetic, so a re-run with no data
+   change reproduces the same scores (see "Determinism").
 2. **Re-grade severity to bump.** To move an issue, a maintainer changes its
    label (P2 → P1) — the one knob they already use. There is deliberately no
    separate `pin:high`/`pin:low`: it would mean the same thing as changing
@@ -452,24 +535,23 @@ just **re-grading severity** — the same field the classifier already sets:
 
 #### Human priority always wins — the bot must not overwrite it
 
-Now that priority is a *computed* label, any job that writes it (the one-time
-backfill, the weekly re-score) could clobber a maintainer's deliberate
-`P0 → P2` or `P3 → P1`. That must never happen. The rule:
+Now that priority is a *computed* label, a **scheduled** job that writes it (the
+re-score, the one-time backfill) runs every tick — so without a guard it *will*
+clobber a maintainer's deliberate `P0 → P2` or `P3 → P1` on the next run. That
+must never happen. The rule:
 
 > **A bot-written priority is a default; a human-written priority is a
 > decision. The bot only ever sets priority on an issue it hasn't set before,
 > and never overwrites a value a human changed.**
 
-Concretely, on top of today's `on: [opened]` triage (which already never
-re-fires on edits), the re-score/backfill jobs must:
+Concretely, the job must:
 
-- **Detect the human edit.** An issue is "human-owned" for priority if its
-  current `P*` label differs from what the bot last wrote. The cheapest durable
-  record is a hidden marker the bot leaves when it labels — e.g. a
-  `bot-priority:P2` shadow label (or a one-line machine-readable note in a
-  pinned tracking comment). If `current P* != bot-priority:*`, a human moved it
-  → **skip**. (GitHub's issue-events API also records who set a label and
-  whether the actor is the bot, as a fallback signal.)
+- **Detect the human edit** via the `issue_bot_state` table (the job's record of
+  the priority it last wrote per issue — the same table that makes the job
+  idempotent against bronze's ingestion lag). If the issue's current `P*` label
+  differs from `issue_bot_state`'s last-bot-written value, a human moved it →
+  **skip**. (GitHub's issue-events API, which records whether the label actor
+  was the bot, is a fallback signal.)
 - **Only fill, never replace.** If an issue has *no* priority label, the job may
   set one. If it already has one the bot itself last wrote, the job may update
   it (the grade legitimately changed). If a human wrote it, the job leaves the
@@ -492,10 +574,10 @@ the process** — a working target is **≤10% of issues touched**. If you're
 correcting more than that, the fix isn't more editing, it's tuning the prompt or
 weights (below). Two properties make correction cheap and safe:
 
-- **Corrections are sticky.** Two layers guarantee this: initial triage runs
-  `on: issues [opened]` only (never re-fires on edits), and the re-score/backfill
-  jobs honor the human-override guard above — a priority a human changed is never
-  overwritten, only surfaced as disagreement if the bot would grade it otherwise.
+- **Corrections are sticky.** The scheduled job honors the human-override guard
+  above — a priority a human changed is recorded in `issue_bot_state` as
+  human-owned and never overwritten, only surfaced as disagreement if the bot
+  would grade it otherwise.
 - **One knob.** You change the **priority label** (the field the classifier
   emits). The score is a pure function of it plus mechanical factors — no
   separate override to learn.
@@ -631,10 +713,14 @@ a test). It does **not** create any `comp:*` labels or wire `areas.json` into th
 live classifier. The steps below are the implementation plan, each intended as
 its own follow-up PR.
 
-1. **Prompt re-calibration** (`.github/triage/config.yaml`) — new priority
-   rubric (grade FRs across buckets; explicit P0 list; tier-1 floor) + the "P1
-   scarcity" guardrail + emit `severity`, `readiness`, and `sub_area` fields.
-   Low risk, affects new issues immediately.
+1. **Prompt re-calibration + persist severity** (`.github/triage/config.yaml`)
+   — new priority rubric (grade FRs across buckets; explicit P0 list; tier-1
+   floor) + the "P1 scarcity" guardrail + emit `severity`, `readiness`, and
+   `sub_area`. **`severity` is graded once at triage and persisted** (a stored
+   field, not just a transient classification): it's the largest multiplier and
+   the one input the score can't recompute from labels/text alone, so storing it
+   is what makes re-scoring deterministic (see "Determinism"). Low risk, affects
+   new issues immediately.
 2. **Component weight + labels** — the per-area `weight`/`weight_source` fields
    are already in `areas.json` (harness = telemetry, non-harness = editorial;
    confirm the harness bands and editorial weights in the team channel). Add the
@@ -644,10 +730,15 @@ its own follow-up PR.
    classifier allowlist and backfill. See "Component taxonomy" and Axis 3.
 3. **Template fields** — add Harness (+SDK/native) / Platform-device / Impact /
    Auth-type dropdowns.
-4. **Scoring job** — productionize `score_prototype.py` into a scheduled action
-   that reads LLM-graded severity + readiness + dup count and publishes the
-   ranked view. **Must implement the human-override guard** (write a
-   `bot-priority:*` shadow label; skip any issue whose `P*` a human changed).
+4. **Scoring & triage job (Databricks notebook, not a GitHub Action)** —
+   productionize `score_prototype.py` as a scheduled Databricks job. It reads
+   the already-synced issues table, computes score + derived priority **in one
+   place**, writes the `issue_scores` table the dashboard reads, and applies the
+   priority/component labels back to GitHub. See "Surfacing the score" below for
+   the data flow, the read-tokenless / write-with-secret split, and the
+   preserved prompt-injection boundary. **Must implement the human-override
+   guard** (an `issue_bot_state` record of what the bot last wrote; skip any
+   issue whose `P*` a human changed).
 5. **One-time backfill (regrade)** — re-run the classifier over open issues to
    relabel under the new rubric (see "How regrading works"); preview with
    `score_prototype.py --regrade`. Sets priority only where none exists or the
