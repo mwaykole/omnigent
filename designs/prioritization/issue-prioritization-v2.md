@@ -214,8 +214,9 @@ default. If information is partial but comprehensible, then 1.0.
 
 ### Axis 7 - Community demand
 
-Unique user engagement and comments and thumb-up will be counted additively. So they will bump the
-issue but won't have too much weight. Existing issues get at most 15 pts today.
+GitHub `+1` reactions add a small, linear bonus: `15 × min(upvotes, 12) / 12`.
+The same rule applies to every issue type, so demand can add at most 15 points.
+Comments are excluded because they mostly measure debugging activity, not demand.
 
 ### Optional module — Age factor
 
@@ -235,7 +236,7 @@ base  = severity_weight              # LLM grade, reach folded in (S0/S1/S2/S3 =
       × component_weight             # areas.json per-area weight 1.4/1.2/1.1/1.0/0.9 (Axis 3)
       × dup_reach                    # +15% per confirmed duplicate, capped +50% (Axis 5)
 
-score = apply_demand(base, type)     # additive, ≤15 pts (Axis 7)
+score = base + demand_points         # 15 × min(upvotes, 12) / 12 (Axis 7)
 
 # Optional modules, default off in v1:
 score = score × readiness_factor     # if enabled: ready 1.1 · normal 1.0 · needs-info 0.85
@@ -307,6 +308,9 @@ But regex only keyword-matches — to check the *design*, an LLM (this one) read
 through the same scoring machinery (severity × component × dup, then demand).
 **Priority flipped on 49 of 100** — the argument for grading severity with the
 classifier in production.
+
+`score_prototype.py` is retained as historical scratch paper; the formula above
+and the production scoring config are canonical.
 
 **Distribution (100 issues):**
 
