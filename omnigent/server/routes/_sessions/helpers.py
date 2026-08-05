@@ -14,7 +14,15 @@ import secrets
 import time
 import urllib.parse
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
@@ -6951,7 +6959,7 @@ async def _iter_session_events(
     viewer_user_id: str | None = None,
     viewer_idle: bool = False,
     presence_root_id: str | None = None,
-) -> AsyncIterator[tuple[str, dict[str, Any]]]:
+) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
     """
     Yield validated ``(event_type, payload)`` pairs from the live stream.
 
