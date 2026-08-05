@@ -100,9 +100,33 @@ are distinct and it's worth being precise:
    issues *within and across* priority labels, so two issues that share a label
    aren't stuck equal.
 3. **Priority label (the outcome)** — the human-facing bucket the score lands
-   in. This is what maintainers **sort, filter, and action on**; the score is
-   the *reference for why* an issue got that label. The label is derived, not
-   hand-assigned by type.
+   in, **by fixed score thresholds** (below). This is what maintainers **sort,
+   filter, and action on**; the score is the *reference for why* an issue got
+   that label. The label is derived from the score, not hand-assigned by type.
+
+**Score → priority label.** One derivation, no parallel rubric: the label is
+just which band the final score falls in. The cut-points sit at the severity
+band values, so a *multiplier* (tier / reach / dup / readiness / demand) is what
+lets an issue cross **up** a band:
+
+| Score | Priority | Reading |
+|---|---|---|
+| **≥ 100** | **P0-critical** | a critical-severity issue, or one pushed there by reach/tier |
+| **≥ 60** | **P1-high** | high severity, or a medium boosted by a tier-1 harness / broad reach |
+| **≥ 25** | **P2-medium** | ordinary graded work |
+| **< 25** | **P3-low** | minor / narrow |
+
+Example: a "high" bug (severity 60) in a tier-1 harness scores 60 × 1.4 = 84 →
+clears **P1**; the same bug on a niche harness scores 60 × 0.9 = 54 → stays
+**P2**. The multiplier moved the label. (Thresholds are tunable constants —
+`P0_MIN`/`P1_MIN`/`P2_MIN` in `score_prototype.py`; the current values give P0 9
+/ P1 58 / P2 206 / P3 87 on the snapshot, a 22% P1-bug share.)
+
+*One consequence worth naming:* because the label comes from the full score,
+non-severity signals **can** tip it — a heavily-reacted FR or a much-duplicated
+bug can cross into P1. That's intended (demand/blast-radius are legitimate
+priority inputs), but it's bounded: demand is capped (Community demand) and a
+single FR can't reach P0 on reactions alone.
 
 So: axes → severity → score → priority label. The score exists precisely because
 a label alone can't order issues that share it (Serena/Pat: "two issues of the
@@ -139,11 +163,14 @@ Grow the list as real P0s surface. Note we **don't run a hosted service**, so
 on every client) — dropped from the definition in favor of the concrete cases
 above.
 
-**A simple tier→priority floor** (per review, as a sanity check on the graded
-score): a *valid bug* in a **tier-1** harness is **at least P1**; a valid bug in
-tier-2/3 is normally P2/P3 unless its severity/reach pushes it up. The score
-does the fine ordering; this floor keeps the classifier from under-grading a
-flagship-harness bug.
+**Tier-1 grading heuristic** (per review). Rather than a hard label floor that
+would override the score, this is guidance to the *grader*: a valid,
+reproducible bug in a **tier-1** harness should rarely be graded below `high`
+severity — a flagship harness failing is, by definition, a serious problem. That
+severity (60) × the tier-1 multiplier (1.4) = 84, which clears P1 through the
+normal score→label path. So the heuristic keeps flagship bugs out of P2 *without*
+a second rule: it just tells the grader not to under-call their severity. Tier
+2/3 bugs land P2/P3 unless severity/reach earn more.
 
 **FRs are graded, not defaulted.** The old prompt defaulted every FR to P2;
 that's the "all FRs are equal" trap. An FR gets P1 when its *absence* is a
@@ -160,8 +187,9 @@ on one platform with a workaround is P2, not P1."**
 
 #### How regrading works
 
-Regrading maps an issue to a priority *bucket* from `severity × reach` — a
-pure label change, independent of the score. It runs in two situations:
+Regrading assigns an issue's priority *label* by computing its score and
+applying the thresholds above — the same derivation used everywhere, so there's
+no second rubric to keep in sync. It runs in two situations:
 
 1. **One-time backfill.** Re-run the classifier over the existing open issues
    once, so the backlog reflects the new rubric on day one. This is a labels-only
@@ -172,42 +200,35 @@ pure label change, independent of the score. It runs in two situations:
    lever (see "Ongoing adjustment"). The scheduled re-score reads the updated
    label the next time it runs.
 
-The mapping is mechanical once severity and reach are graded:
-
-| Graded severity | + reach | → priority |
-|---|---|---|
-| critical (security / data-loss / all-users-down) | any | **P0** |
-| high (crash / hang / no-workaround; FR: blocks common workflow) | broad / normal | **P1** |
-| high | single-platform | **P2** |
-| medium | broad | **P1** |
-| medium | normal / narrow | **P2** |
-| low / narrow FR | — | **P3** |
+The mapping is exactly the score → priority table above (`score ≥ 100 → P0`,
+`≥ 60 → P1`, `≥ 25 → P2`, else `P3`); nothing separate to define.
 
 **Backfill preview** (`score_prototype.py --regrade`, regex grader over the 360
 open issues — the production backfill uses the LLM grader):
 
 | Priority | Now | Regraded |
 |---|---|---|
-| P0-critical | 3 | 8 |
-| **P1-high** | **128** | **65** |
-| P2-medium | 203 | 273 |
-| P3-low | 15 | 14 |
+| P0-critical | 3 | 9 |
+| **P1-high** | **128** | **58** |
+| P2-medium | 203 | 206 |
+| P3-low | 15 | 87 |
 | (no priority) | 11 | 0 |
 
-**P1 share of open bugs: 60% → 25%** — the inflation drained, the P1/P2 binary
-un-collapsed. What moves, and why:
+**P1 share of open bugs: 60% → 22%** — the inflation drained, and P3 fills out
+(score-thresholding sends genuinely-minor items to P3, where the old label
+distribution left it vestigial). What moves, and why:
 
 | Change | Count | Example |
 |---|---|---|
-| P1 → P2 | 87 | #3980 desktop dialog paint-over — medium severity, single-platform (not "all users, no workaround") |
-| P2 → P1 | 24 | #3976 headless OAuth2 grant — high-severity FR, broad reach (was defaulted to P2) |
-| P2 → P3 | 10 | #3074 OS-native directory picker — narrow nice-to-have FR |
-| P3 → P2 | 12 | under-graded items pulled up |
-| P2 → P0 | 4 | #659 microvm sandbox backend — security-tier |
+| P1 → P2 | 85 | #3981 desktop rail resize — medium severity, single-platform (score 33) |
+| P2 → P3 | 68 | #4027 "delete button on web UI" — narrow FR (score 22, below the P2 cut) |
+| P2 → P1 | 23 | #3976 headless OAuth2 grant — high-severity FR, broad reach (score 99) |
+| P1 → P3 | 9 | #3980 desktop dialog paint-over — minor, single-platform (score 25) |
+| P2 → P0 | 4 | #2125 multi-host git creds — credential-crossing (score 104) |
 
 *Caveat:* these per-issue moves use the regex grader, so they inherit its known
 false positives (e.g. #2057/#2054 "sandbox bypass" FRs wrongly reach P0). Read
-the **aggregate shape** (60% → 25%) as the reliable signal and individual rows
+the **aggregate shape** (60% → 22%) as the reliable signal and individual rows
 as illustrative; the LLM backfill corrects the outliers.
 
 ### Axis 3 — Harness tier (new, derived)
@@ -313,20 +334,21 @@ with linux_bwrap dies at spawn"):
 
 | Factor | Value | Why |
 |---|---|---|
-| severity | 60 (high) | body matches "cannot start" / spawn death — a hard failure, no workaround |
-| × reach | × 1.0 | affects the linux_bwrap sandbox config, not literally all users |
+| severity | 60 (high) | spawn death — a hard failure, no workaround |
+| × reach | × 1.5 | body says it hits every session on the config → broad |
 | × harness_tier | × 1.4 | title says `claude-sdk` → tier-1 |
 | × dup_reach | × 1.0 | no confirmed duplicates (yet) |
-| × readiness | × 1.1 | 400+ char body with repro steps → ready to work |
-| = base | **92.4** | |
+| × readiness | × 1.0 | no explicit repro section matched → no bump |
+| = base | **126** | 60 × 1.5 × 1.4 |
 | × demand (bug) | + 0 | 0 reactions; bugs get only the additive tiebreak |
 | × age | × 1.0 | neutral by default — age never lowers the score |
-| **= score** | **≈ 92** | ranks **#3** of 360 (was #37 by priority label) |
+| **= score** | **126** | **≥ 100 → P0-critical**; ranks **#3** of 360 (was P1, rank #37) |
 
 Contrast a vague, low-tier ticket: severity 30 (medium) × reach 0.9
-(single-platform) × tier 0.9 (tier-3 harness) × readiness 1.0 ≈ **24** — an
-order of magnitude lower, so it sits deep in the queue. That gap is the point:
-the score turns four cheap data points into an order.
+(single-platform) × tier 0.9 (tier-3 harness) × readiness 1.0 ≈ **24** → **P3**
+(below the 25 cut) — an order of magnitude lower, so it sits deep in the queue.
+Same five data points, opposite ends of the queue *and* opposite priority
+labels: that's the score→label derivation doing the work.
 
 **Why severity is LLM-graded, not label-derived:** the dry-run
 (`score_prototype.py`) grades severity with regex for reproducibility, and it
@@ -573,7 +595,7 @@ Two concrete changes:
 5. **One-time backfill (regrade)** — re-run the classifier over open issues to
    relabel under the new rubric (see "How regrading works"); preview with
    `score_prototype.py --regrade`. Target: P1 back under ~20% of open bugs
-   (regex preview lands it at 25%; the LLM pass should do better).
+   (regex preview lands it at 22%; the LLM pass should do better).
 6. **Consume dedup output** — once [#4037](https://github.com/omnigent-ai/omnigent/pull/4037)
    lands, feed duplicate count into `dup_reach`; wire the unused `good first
    issue` funnel.

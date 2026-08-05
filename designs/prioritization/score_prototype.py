@@ -235,25 +235,31 @@ def current_rank_key(i):
     return (p, -parse(i["created_at"]).timestamp())
 
 
-def regrade(i):
-    """Map an issue to a priority BUCKET from severity × reach (Axis 2 rubric).
+# Score → priority label: a single derivation (design decision). The cut-points
+# sit at the severity band values (100 = critical, 60 = high, 25 ≈ medium), so a
+# multiplier (tier/reach/dup/readiness/demand) is what lets an issue cross UP a
+# band — e.g. a "high" (60) bug in a tier-1 harness (×1.4 = 84) clears P1, while
+# the same bug on a niche harness (×0.9 = 54) stays P2. On today's snapshot this
+# yields P0 9 / P1 58 / P2 206 / P3 87, and a 24% P1 share of open bugs.
+P0_MIN, P1_MIN, P2_MIN = 100, 60, 25
 
-    This is the backfill output — a priority *label*, not a score. Applies to
-    bugs and FRs alike; type does not cap priority. In production the LLM grades
-    severity/reach; here we reuse the regex severity()/reach() so the backfill
-    preview is reproducible (and carries the same known false positives).
-    """
-    sname, _ = severity(i)
-    r = reach(i)  # 1.5 broad · 1.0 normal · 0.9 single-platform
-    if sname == "critical":  # security/data-loss/all-users-down
+
+def priority_from_score(i):
+    """The priority LABEL, derived from the final score (one system, no parallel
+    rubric). This is both the backfill output and how the classifier's grade
+    becomes a bucket in production."""
+    s = score(i)[0]
+    if s >= P0_MIN:
         return "P0-critical"
-    if sname == "high":  # high severity: broad reach -> P1, narrow -> P2
-        return "P1-high" if r >= 1.0 else "P2-medium"
-    if sname == "medium":  # medium only reaches P1 when reach is broad
-        return "P1-high" if r >= 1.5 else "P2-medium"
-    if sname == "low":
-        return "P3-low"
-    return "P2-medium" if r >= 1.0 else "P3-low"  # FR default: reach decides
+    if s >= P1_MIN:
+        return "P1-high"
+    if s >= P2_MIN:
+        return "P2-medium"
+    return "P3-low"
+
+
+# Back-compat alias for the --regrade path / any external callers.
+regrade = priority_from_score
 
 
 def current_prio(i):
