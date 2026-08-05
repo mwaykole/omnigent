@@ -313,8 +313,8 @@ def print_markdown(opn, limit=200):
     after = sorted(opn, key=lambda i: score(i)[0], reverse=True)
     before_rank = {i["number"]: n for n, i in enumerate(before)}
 
-    print("| # | Score | Sev | Now | Δrank | Issue |")
-    print("|--:|--:|---|---|--:|---|")
+    print("| # | Score | Sev | Now | Derived | Δrank | Issue |")
+    print("|--:|--:|---|---|---|--:|---|")
     for n, i in enumerate(after[:limit]):
         sc, sn = score(i)
         b = before_rank[i["number"]]
@@ -323,7 +323,14 @@ def print_markdown(opn, limit=200):
         title = i["title"].replace("|", "\\|")[:70]
         num = i["number"]
         link = f"[#{num}](https://github.com/omnigent-ai/omnigent/issues/{num})"
-        print(f"| {n + 1} | {sc:.0f} | {sn} | {current_prio(i)} | {arrow} | {link} {title} |")
+        derived = priority_from_score(i).replace("-critical", "").replace("-high", "")
+        derived = derived.replace("-medium", "").replace("-low", "")
+        now = current_prio(i).replace("-critical", "").replace("-high", "")
+        now = now.replace("-medium", "").replace("-low", "")
+        moved = " ⚑" if now != derived and now != "none" else ""
+        print(
+            f"| {n + 1} | {sc:.0f} | {sn} | {now} | {derived}{moved} | {arrow} | {link} {title} |"
+        )
 
 
 def main():
