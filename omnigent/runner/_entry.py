@@ -318,10 +318,6 @@ class _RunnerDatabricksAuth(httpx.Auth):
         if self._factory is not None:
             token = self._factory()
             if not token:
-                if getattr(self._factory, "proxy_auth_failed", False):
-                    # Managed mint failed because the proxy bearer is expired.
-                    # Raise so _invalidate + retry can pick up SDK/OIDC auth.
-                    raise httpx.RequestError("Databricks token refresh returned no token")
                 if getattr(self._factory, "declined", False):
                     # The server definitively refuses to mint for this runner
                     # (managed mint factory hit HTTP 400/404 after install —
@@ -419,6 +415,14 @@ class _InitialAuthTokenFactory:
                     _proxy_bearer=self._last_initial_token,
                 )
                 self._fallback_resolved = True
+            # Managed mint failed because the proxy bearer is expired — the
+            # initial bearer was injected once and cannot self-renew. Re-resolve
+            # without a proxy bearer so we fall through to SDK/OIDC auth.
+            if getattr(self._fallback_factory, "proxy_auth_failed", False):
+                self._fallback_factory = _make_auth_token_factory(
+                    self._server_url,
+                    _allow_initial_token=False,
+                )
             if self._fallback_factory is None:
                 return None
             return self._fallback_factory()
@@ -427,7 +431,8 @@ class _InitialAuthTokenFactory:
     def declined(self) -> bool:
         """True when the inner fallback factory has definitively declined."""
         with self._lock:
-            return getattr(self._fallback_factory, "declined", False)
+            f = self._fallback_factory
+            return getattr(f, "declined", False) and not getattr(f, "proxy_auth_failed", False)
 
     def invalidate(self) -> bool:
         """Discard the host bearer so the next call resolves local auth."""

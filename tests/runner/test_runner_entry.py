@@ -682,6 +682,44 @@ def test_managed_mint_factory_proxy_auth_failure_falls_through_to_sdk(
     assert installed is None
 
 
+def test_initial_host_token_re_resolves_to_sdk_when_proxy_auth_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When managed mint proxy_auth_fails, _InitialAuthTokenFactory falls back to SDK/OIDC."""
+
+    class _SdkAuth:
+        def current_token(self) -> str:
+            return "sdk-token"
+
+    def _resolve(*args: Any, **kwargs: Any) -> tuple[_SdkAuth, str]:
+        return _SdkAuth(), "https://workspace.cloud.databricks.com"
+
+    def _proxy_rejects(*args: Any, **kwargs: Any) -> tuple[str, float]:
+        request = httpx.Request("POST", "https://app.databricksapps.com/v1/runners/r/token")
+        raise httpx.HTTPStatusError(
+            "403", request=request, response=httpx.Response(403, request=request)
+        )
+
+    monkeypatch.setenv("RUNNER_SERVER_URL", "https://app.databricksapps.com")
+    monkeypatch.setenv("OMNIGENT_RUNNER_INITIAL_AUTH_TOKEN", "expired-host-bearer")
+    monkeypatch.setenv("OMNIGENT_RUNNER_TUNNEL_BINDING_TOKEN", "bind-tok")
+    monkeypatch.setenv("OMNIGENT_RUNNER_DELEGATED_AUTH", "1")
+    monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
+    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", _resolve)
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _proxy_rejects)
+
+    factory = _make_auth_token_factory()
+
+    assert isinstance(factory, _InitialAuthTokenFactory)
+    # Simulate the initial bearer expiring and being invalidated.
+    factory.invalidate()
+
+    # The fallback tries managed mint first (proxy bearer = expired-host-bearer).
+    # That 403s → proxy_auth_failed → re-resolves to SDK/OIDC.
+    token = factory()
+    assert token == "sdk-token"
+
+
 def test_mint_managed_owner_token_posts_binding_token_and_parses_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
