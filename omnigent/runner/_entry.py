@@ -318,6 +318,10 @@ class _RunnerDatabricksAuth(httpx.Auth):
         if self._factory is not None:
             token = self._factory()
             if not token:
+                if getattr(self._factory, "proxy_auth_failed", False):
+                    # Managed mint failed because the proxy bearer is expired.
+                    # Raise so _invalidate + retry can pick up SDK/OIDC auth.
+                    raise httpx.RequestError("Databricks token refresh returned no token")
                 if getattr(self._factory, "declined", False):
                     # The server definitively refuses to mint for this runner
                     # (managed mint factory hit HTTP 400/404 after install —
@@ -680,7 +684,7 @@ def _make_managed_mint_factory(
         mint_url, server_url, binding_token, proxy_bearer=proxy_bearer
     )
     factory()
-    if factory.declined:
+    if factory.declined or factory.proxy_auth_failed:
         return None
     return factory
 
@@ -724,6 +728,10 @@ class _ManagedMintTokenFactory:
         self._cached_token: str | None = None
         self._cached_expires_at = 0.0
         self.declined = False
+        # Set when mint fails with 401/403 on the proxy bearer (not a server
+        # refusal). Unlike ``declined``, this means the caller should try
+        # another credential path (SDK/OIDC) rather than sending bare requests.
+        self.proxy_auth_failed = False
 
     def __call__(self) -> str | None:
         """Return a fresh owner JWT, or ``None``.
@@ -760,6 +768,14 @@ class _ManagedMintTokenFactory:
                     self.declined = True
                     return None
                 return self._still_valid_cached_token(now)
+            if response.status_code in (401, 403):
+                # The proxy bearer is expired or invalid. If we have never
+                # successfully minted, there is no self-sustaining refresh
+                # loop to fall back to — signal proxy_auth_failed so the
+                # caller can try SDK/OIDC instead of looping on a dead bearer.
+                if self._cached_token is None:
+                    self.proxy_auth_failed = True
+                    return None
             return self._still_valid_cached_token(now)
         except (httpx.HTTPError, ValueError, KeyError, OSError):
             # Transient mint failure: keep serving the cached token while
