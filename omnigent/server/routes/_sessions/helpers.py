@@ -8675,6 +8675,11 @@ def _child_session_summary_from_conversation(
             last_message_preview = collapsed[:_CHILD_PREVIEW_LIMIT] or None
 
     routing_decision_id = conv.labels.get(ROUTING_DECISION_LABEL_KEY)
+    raw_cost = conv.session_usage.get("total_cost_usd")
+    try:
+        cost_usd = float(raw_cost) if raw_cost is not None else None
+    except (TypeError, ValueError):
+        cost_usd = None
     return ChildSessionSummary(
         id=conv.id,
         parent_session_id=parent_session_id,
@@ -8705,6 +8710,7 @@ def _child_session_summary_from_conversation(
         # conversation label rather than a new column.
         routed_model=conv.model_override if routing_decision_id is not None else None,
         routing_decision_id=routing_decision_id,
+        cost_usd=cost_usd,
     )
 
 

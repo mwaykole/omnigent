@@ -59,6 +59,12 @@ export interface ChildSessionInfo {
    * not routed (routing off, or a server that predates the field).
    */
   routed_model?: string | null;
+  /** Unix epoch seconds of child creation. */
+  created_at: number;
+  /** Unix epoch seconds of last activity. */
+  updated_at: number;
+  /** Cumulative USD spend for this child session, ``null`` when unpriced. */
+  cost_usd: number | null;
 }
 
 /**
@@ -79,6 +85,9 @@ interface ChildSessionWire {
   last_message_preview?: string | null;
   pending_elicitations_count?: number;
   routed_model?: string | null;
+  created_at?: number;
+  updated_at?: number;
+  cost_usd?: number | null;
 }
 
 interface ChildSessionsResponse {
@@ -192,6 +201,9 @@ export async function fetchChildSessions(sessionId: string): Promise<ChildSessio
     last_message_preview: row.last_message_preview ?? null,
     pending_elicitations_count: row.pending_elicitations_count ?? 0,
     routed_model: row.routed_model ?? null,
+    created_at: row.created_at ?? 0,
+    updated_at: row.updated_at ?? 0,
+    cost_usd: row.cost_usd ?? null,
   }));
 }
 

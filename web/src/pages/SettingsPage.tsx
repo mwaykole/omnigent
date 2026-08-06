@@ -186,6 +186,9 @@ const PoliciesPage = lazy(() =>
 const SharingPage = lazy(() =>
   import("@/pages/SharingPage").then((m) => ({ default: m.SharingPage })),
 );
+const UsageSectionLazy = lazy(() =>
+  import("@/pages/UsageSection").then((m) => ({ default: m.UsageSection })),
+);
 
 /**
  * Settings content panel. The section nav lives in the sidebar card
@@ -231,6 +234,11 @@ export function SettingsPage() {
       {section === "appearance" && <AppearanceSection />}
       {section === "git" && <GitSection />}
       {section === "shortcuts" && <ShortcutsSection />}
+      {section === "usage" && (
+        <Suspense fallback={null}>
+          <UsageSectionLazy />
+        </Suspense>
+      )}
       {section === "account" && hasAuthSession && <AccountSection />}
       {section === "archived" && <ArchivedSection />}
       {section === "cli" && isElectronShell() && <LocalCliSection />}

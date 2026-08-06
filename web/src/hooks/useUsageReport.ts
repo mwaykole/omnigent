@@ -5,6 +5,7 @@ export function useUsageReport() {
   return useQuery<UsageReport>({
     queryKey: ["usage"],
     queryFn: fetchUsageReport,
-    staleTime: 60_000,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
   });
 }

@@ -156,6 +156,7 @@ export function SubagentsPanel({ conversationId, rootSessionId }: SubagentsPanel
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-card">
       <ViewModeToggle viewMode={viewMode} onViewModeChange={setViewMode} />
+      <TreeCostSummary children={children} />
       <button
         type="button"
         data-testid="add-agent-button"
@@ -216,6 +217,25 @@ function ViewModeToggle({
       >
         <NetworkIcon className="size-3.5" />
       </Button>
+    </div>
+  );
+}
+
+function TreeCostSummary({ children }: { children: ChildSessionInfo[] }) {
+  const totalCost = children.reduce((sum, c) => sum + (c.cost_usd ?? 0), 0);
+  const activeCount = children.filter((c) => c.busy).length;
+  if (totalCost === 0 && activeCount === 0) return null;
+  return (
+    <div className="flex shrink-0 items-center justify-between border-b px-3 py-1 text-[11px] text-muted-foreground">
+      <span>
+        {children.length} agent{children.length !== 1 && "s"}
+        {activeCount > 0 && (
+          <span className="text-emerald-500"> · {activeCount} active</span>
+        )}
+      </span>
+      {totalCost > 0 && (
+        <span className="tabular-nums font-medium">{fmtCost(totalCost)}</span>
+      )}
     </div>
   );
 }
@@ -578,6 +598,45 @@ function rowPaddingLeft(depth: number): number {
   return ROW_BASE_PADDING_PX + (depth - 1) * ROW_DEPTH_STEP_PX;
 }
 
+function fmtCost(usd: number): string {
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
+function fmtDuration(startEpoch: number, endEpoch: number): string {
+  const secs = Math.max(0, endEpoch - startEpoch);
+  if (secs < 60) return `${Math.round(secs)}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  return `${hours}h ${mins % 60}m`;
+}
+
+function AgentMeta({ child }: { child: ChildSessionInfo }) {
+  const hasCost = child.cost_usd != null && child.cost_usd > 0;
+  const hasDuration = child.created_at > 0 && child.updated_at > 0;
+  if (!hasCost && !hasDuration) return null;
+  const parts: string[] = [];
+  if (hasDuration) parts.push(fmtDuration(child.created_at, child.updated_at));
+  if (hasCost) parts.push(fmtCost(child.cost_usd!));
+  return (
+    <span
+      className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground"
+      title={
+        [
+          hasDuration && `Duration: ${fmtDuration(child.created_at, child.updated_at)}`,
+          hasCost && `Cost: ${fmtCost(child.cost_usd!)}`,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      }
+    >
+      {parts.join(" · ")}
+    </span>
+  );
+}
+
 function SubagentRow({
   child,
   depth,
@@ -658,8 +717,6 @@ function SubagentRow({
             <Icon className="size-3.5 shrink-0 text-muted-foreground" />
             <span className="shrink-0 truncate text-sm font-medium">{primary}</span>
             {child.routed_model ? (
-              // Model the intelligent router picked for this sub-agent — the
-              // per-subagent half of routing visibility.
               <span
                 data-testid="subagent-routed-model"
                 title={`Smart routing picked ${child.routed_model}`}
@@ -669,6 +726,7 @@ function SubagentRow({
               </span>
             ) : null}
             <span className="flex-1" />
+            <AgentMeta child={child} />
             <StatusIndicator {...status} />
           </div>
           {child.last_message_preview && (

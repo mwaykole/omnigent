@@ -68,6 +68,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useNavigate, useParams } from "@/lib/routing";
 import { SidebarHeaderActions } from "./SidebarHeaderActions";
 import omnigentWordmark from "@/assets/omnigent-wordmark.svg";
+import { useUsageReport } from "@/hooks/useUsageReport";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -463,6 +464,27 @@ export function useMigrateLocalPinsToServer(
     // server upgrade); the ref guard prevents re-entry once it actually runs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinnedLoaded, filterHonored]);
+}
+
+function SidebarCostBadge() {
+  const { data } = useUsageReport();
+  if (!data || data.costToday === 0) return null;
+  const cost = data.costToday < 0.01
+    ? `$${data.costToday.toFixed(4)}`
+    : data.costToday < 1
+      ? `$${data.costToday.toFixed(3)}`
+      : `$${data.costToday.toFixed(2)}`;
+  return (
+    <div className="mx-3 mt-2">
+      <Link
+        to="/settings/usage"
+        className="flex items-center justify-between rounded-md bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      >
+        <span>Today&apos;s spend</span>
+        <span className="font-medium tabular-nums">{cost}</span>
+      </Link>
+    </div>
+  );
 }
 
 export function Sidebar({
@@ -947,6 +969,8 @@ export function Sidebar({
               </Link>
             </Button>
           </div>
+
+          <SidebarCostBadge />
 
           <nav
             ref={scrollContainerRef}

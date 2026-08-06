@@ -825,6 +825,7 @@ class ChildSessionSummary(BaseModel):
     pending_elicitations_count: int = 0
     routed_model: str | None = None
     routing_decision_id: str | None = None
+    cost_usd: float | None = None
 
 
 # ── Responses ───────────────────────────────────────────────────
