@@ -104,6 +104,19 @@ _PERMISSION_HOOK_FILE = "permission_hook.json"
 _CONTEXT_FILE = "context.json"
 _USER_CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 _MCP_SERVER_NAME = "omnigent"
+
+
+def _python_isolation_flags(python: str) -> list[str]:
+    """Return ``["-I"]`` when isolated mode can import omnigent, else ``[]``."""
+    import subprocess
+
+    ok = subprocess.run(
+        [python, "-I", "-c", "import omnigent"],
+        capture_output=True,
+    ).returncode == 0
+    return ["-I"] if ok else []
+
+
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 # Tools-changed: harness POSTs to the bridge MCP server's localhost
 # control endpoint, which emits ``notifications/tools/list_changed``
@@ -1292,12 +1305,13 @@ def build_mcp_config(bridge_dir: Path, *, python_executable: str | None = None) 
     :returns: JSON-serializable Claude MCP config.
     """
     python = python_executable or sys.executable
+    iso = _python_isolation_flags(python)
     return {
         "mcpServers": {
             _MCP_SERVER_NAME: {
                 "command": python,
                 "args": [
-                    "-I",
+                    *iso,
                     "-m",
                     "omnigent.claude_native_bridge",
                     "serve-mcp",
@@ -1365,14 +1379,10 @@ def build_hook_settings(
     :returns: JSON-serializable Claude settings fragment.
     """
     python = python_executable or sys.executable
-    # -I (isolated mode) prevents Python from adding the session's
-    # working directory to sys.path, which would shadow the installed
-    # omnigent package with a local checkout in the cwd (e.g. a
-    # git worktree that has its own omnigent/ directory on a
-    # different branch).
+    isolation_flags = _python_isolation_flags(python)
     command_parts = [
         python,
-        "-I",
+        *isolation_flags,
         "-m",
         "omnigent.claude_native_hook",
         "--bridge-dir",
@@ -1465,7 +1475,7 @@ def build_hook_settings(
         # restarting Claude.
         permission_command_parts = [
             python,
-            "-I",
+            *isolation_flags,
             "-m",
             "omnigent.claude_native_hook",
             "permission-request",
@@ -1529,7 +1539,7 @@ def build_hook_settings(
         # form. It's a no-op in other modes to avoid double-surfacing.
         ask_uq_command_parts = [
             python,
-            "-I",
+            *isolation_flags,
             "-m",
             "omnigent.claude_native_hook",
             "ask-user-question",

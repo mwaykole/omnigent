@@ -2025,7 +2025,26 @@ export const useChatStore = create<ChatState>((_rootSet, get) => ({
   compact: async () => {
     const { conversationId } = get();
     if (!conversationId) return;
-    await postEvent(conversationId, { type: "compact", data: {} });
+    if ((useChatStore as any)._compactingNow) return;
+    (useChatStore as any)._compactingNow = true;
+    const removeAllLoadingBlocks = () => {
+      useChatStore.setState((s) => {
+        const filtered = s.blocks.filter((b) => b.type !== "compaction_loading");
+        return filtered.length === s.blocks.length ? {} : { blocks: filtered };
+      });
+    };
+    const tid = window.setTimeout(() => {
+      removeAllLoadingBlocks();
+      (useChatStore as any)._compactingNow = false;
+    }, 15_000);
+    (useChatStore as any)._compactionTimeout = tid;
+    try {
+      await postEvent(conversationId, { type: "compact", data: {} });
+    } catch {
+      window.clearTimeout(tid);
+      removeAllLoadingBlocks();
+      (useChatStore as any)._compactingNow = false;
+    }
   },
 
   refreshSessionState: async (conversationId) => {
@@ -5210,23 +5229,21 @@ export function handleSessionEvent(event: StreamEvent, streamConversationId?: st
       queryClient?.invalidateQueries({ queryKey: terminalsQueryKey(event.conversationId) });
       return;
     case "compaction_completed":
-      // Update the context-ring immediately with the post-compaction token
-      // estimate so the ring reflects the reduced context without waiting
-      // for the next LLM response.completed event.
+      window.clearTimeout((useChatStore as any)._compactionTimeout);
+      (useChatStore as any)._compactingNow = false;
       if (event.totalTokens != null) {
         applyToConversation({ tokensUsed: event.totalTokens });
       }
       return;
-    case "compaction_failed":
-      // Compaction failed — history is unchanged. Remove the compaction_loading
-      // block so the "Compacting…" shimmer disappears without leaving a marker.
-      applyToConversation((s) => {
-        const idx = [...s.blocks].reverse().findIndex((b) => b.type === "compaction_loading");
-        if (idx === -1) return {};
-        const realIdx = s.blocks.length - 1 - idx;
-        return { blocks: [...s.blocks.slice(0, realIdx), ...s.blocks.slice(realIdx + 1)] };
+    case "compaction_failed": {
+      window.clearTimeout((useChatStore as any)._compactionTimeout);
+      (useChatStore as any)._compactingNow = false;
+      useChatStore.setState((s) => {
+        const filtered = s.blocks.filter((b) => b.type !== "compaction_loading");
+        return filtered.length === s.blocks.length ? {} : { blocks: filtered };
       });
       return;
+    }
     case "policy_denied":
       // Policy denied the user input — drop the optimistic bubble (the
       // server won't emit session.input.consumed for denied inputs, so
