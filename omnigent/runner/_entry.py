@@ -416,12 +416,13 @@ class _InitialAuthTokenFactory:
                 )
                 self._fallback_resolved = True
             # Managed mint failed because the proxy bearer is expired — the
-            # initial bearer was injected once and cannot self-renew. Re-resolve
-            # without a proxy bearer so we fall through to SDK/OIDC auth.
+            # initial bearer was injected once and cannot self-renew. Skip
+            # managed mint entirely and go straight to SDK/OIDC.
             if getattr(self._fallback_factory, "proxy_auth_failed", False):
                 self._fallback_factory = _make_auth_token_factory(
                     self._server_url,
                     _allow_initial_token=False,
+                    _allow_delegated_mint=False,
                 )
             if self._fallback_factory is None:
                 return None
