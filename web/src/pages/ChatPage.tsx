@@ -30,6 +30,9 @@ import {
   SquareIcon,
   WifiOffIcon,
   XIcon,
+  BrainCircuitIcon,
+  CircleDollarSignIcon,
+  ZapIcon,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -165,7 +168,7 @@ import {
   type WorkspaceFile,
 } from "@/hooks/useWorkspaceChangedFiles";
 import { ComposerMicButton } from "@/components/ComposerMicButton";
-import { isCostRoutingSession, isSubagentRoutingSession } from "@/components/CostRoutingControl";
+import { isCostRoutingSession, isSubagentRoutingSession, shortModelName } from "@/components/CostRoutingControl";
 import { isSessionScopedDecision, showsRoutingDecisionChip } from "@/lib/routingDecision";
 import {
   Dialog,
@@ -199,6 +202,7 @@ import { ResumeWithDirectoryDialog } from "@/shell/ResumeWithDirectoryDialog";
 import { ReconnectSessionDialog } from "@/shell/ReconnectSessionDialog";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { useForkDialog } from "@/shell/ForkDialogContext";
+import { ToolActivityPanel } from "@/shell/ToolActivityPanel";
 import { supportsEffortControl } from "@/lib/sessionCapabilities";
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
 import { getCliServerUrl } from "@/lib/host";
@@ -2166,6 +2170,8 @@ function MainAgentSurface({
             }
           />
 
+          <ToolActivityPanel />
+
           <Composer
             disabled={disabled}
             status={status}
@@ -2202,6 +2208,7 @@ function MainAgentSurface({
             subagentRoutingEligible={subagentRoutingEligible}
             subAgentLabel={subAgentLabel}
             wrapperLabel={wrapperLabel}
+            onGrowthChange={publishComposerGrowth}
           />
 
           {/* Chat/Terminal toggle for terminal-first sessions, reconnect-or-
@@ -4098,6 +4105,136 @@ function fmtTokens(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
+function CostIntelligenceIndicator({ costRoutingEligible }: { costRoutingEligible: boolean }) {
+  const sessionCostUsd = useChatStore((s) => s.sessionCostUsd);
+  const sessionUsageByModel = useChatStore((s) => s.sessionUsageByModel);
+  const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
+  const llmModel = useChatStore((s) => s.llmModel);
+  const routingOn = costRoutingEligible && costControlModeOverride === "on";
+  const cost = sessionCostUsd ?? 0;
+  const currentModel = llmModel ? shortModelName(llmModel) : null;
+
+  const modelBreakdown = useMemo(() => {
+    if (!sessionUsageByModel) return [];
+    return Object.entries(sessionUsageByModel)
+      .map(([model, usage]) => ({
+        model: shortModelName(model),
+        rawModel: model,
+        cost: usage.totalCostUsd ?? 0,
+        input: usage.inputTokens ?? 0,
+        output: usage.outputTokens ?? 0,
+      }))
+      .filter((m) => m.cost > 0 || m.input > 0)
+      .sort((a, b) => b.cost - a.cost);
+  }, [sessionUsageByModel]);
+
+  const fmtCost = (usd: number): string => {
+    if (usd === 0) return "$0.00";
+    if (usd < 0.001) return `$${usd.toFixed(5)}`;
+    if (usd < 0.01) return `$${usd.toFixed(4)}`;
+    if (usd < 1) return `$${usd.toFixed(3)}`;
+    return `$${usd.toFixed(2)}`;
+  };
+
+  const toggleRouting = useCallback(() => {
+    if (!costRoutingEligible) return;
+    const store = useChatStore.getState();
+    void store.setCostControlMode(routingOn ? "off" : "on");
+  }, [costRoutingEligible, routingOn]);
+
+  const trigger = (
+    <span className="flex cursor-pointer items-center gap-1.5 text-muted-foreground transition-colors hover:text-foreground">
+      {routingOn ? (
+        <BrainCircuitIcon className="size-3.5 text-info" />
+      ) : (
+        <CircleDollarSignIcon className="size-3.5" />
+      )}
+      {currentModel && !routingOn && (
+        <span className="text-xs font-medium text-foreground">{currentModel}</span>
+      )}
+      {routingOn && (
+        <span className="text-xs font-medium text-info">auto</span>
+      )}
+      <span className="text-xs tabular-nums">{fmtCost(cost)}</span>
+    </span>
+  );
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>{trigger}</PopoverTrigger>
+      <PopoverContent side="top" align="end" className="w-72 p-3 text-xs">
+        <div className="mb-2 flex items-center justify-between">
+          <span className="font-medium text-foreground">Cost Intelligence</span>
+          {costRoutingEligible && (
+            <button
+              type="button"
+              onClick={toggleRouting}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+                routingOn
+                  ? "bg-info/10 text-info hover:bg-info/20"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80",
+              )}
+            >
+              <BrainCircuitIcon className="size-3" />
+              {routingOn ? "Routing On" : "Routing Off"}
+            </button>
+          )}
+        </div>
+
+        <div className="mb-3 flex items-baseline justify-between">
+          <span className="text-muted-foreground">Session total</span>
+          <span className="text-base font-semibold tabular-nums text-foreground">
+            {fmtCost(cost)}
+          </span>
+        </div>
+
+        {currentModel && (
+          <div className="mb-3 flex items-center justify-between">
+            <span className="text-muted-foreground">Model</span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+                {currentModel}
+              </span>
+              {routingOn && <ZapIcon className="size-3 text-amber-500" />}
+            </span>
+          </div>
+        )}
+
+        {modelBreakdown.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Per model
+            </span>
+            {modelBreakdown.map((m) => (
+              <div key={m.rawModel} className="flex items-center justify-between gap-2">
+                <div className="flex min-w-0 flex-1 items-center gap-2">
+                  <span className="inline-flex shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium">
+                    {m.model}
+                  </span>
+                  <span className="truncate text-muted-foreground">
+                    {fmtTokens(m.input)} in · {fmtTokens(m.output)} out
+                  </span>
+                </div>
+                <span className="shrink-0 tabular-nums font-medium">{fmtCost(m.cost)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {routingOn && (
+          <div className="mt-3 rounded-md bg-info/5 px-2.5 py-2 text-muted-foreground">
+            <span className="flex items-center gap-1.5">
+              <ZapIcon className="size-3 text-amber-500" />
+              Model auto-selected per turn to optimize cost and quality.
+            </span>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /** Clickable context ring with popover showing token breakdown and compact button. */
 function ContextRing({ contextWindow, tokensUsed }: { contextWindow: number; tokensUsed: number }) {
   const pct = Math.min(tokensUsed / contextWindow, 1);
@@ -4269,6 +4406,7 @@ function ComposerStatusLine({
   goal,
   isSubAgentSession,
   onHostReconnect,
+  costRoutingEligible = false,
 }: {
   goal: Goal | null;
   isSubAgentSession: boolean;
@@ -4278,6 +4416,7 @@ function ComposerStatusLine({
    * offline and reconnectable.
    */
   onHostReconnect?: () => void;
+  costRoutingEligible?: boolean;
 }) {
   const conversationId = useChatStore((s) => s.conversationId);
   const contextWindow = useChatStore((s) => s.contextWindow);
@@ -4312,7 +4451,8 @@ function ComposerStatusLine({
   // the badge is where it lives and an unreachable session often has no
   // branch/ring at all.
   const showHostBadge = showHost && isHostBound;
-  if (!showBranch && !showPlanMode && !showGoal && !showRing && !showHostBadge) return null;
+  const showCost = !!conversationId;
+  if (!showBranch && !showPlanMode && !showGoal && !showRing && !showHostBadge && !showCost) return null;
 
   return (
     <div
@@ -4349,6 +4489,7 @@ function ComposerStatusLine({
           </span>
         )}
         {showGoal && goal && <GoalStatusPill goal={goal} />}
+        {showCost && <CostIntelligenceIndicator costRoutingEligible={costRoutingEligible} />}
         {showRing && <ContextRing contextWindow={contextWindow} tokensUsed={tokensUsed} />}
       </div>
     </div>
@@ -5743,6 +5884,7 @@ export function Composer({
         goal={goal}
         isSubAgentSession={subAgentLabel != null}
         onHostReconnect={onShowReconnectHelp}
+        costRoutingEligible={costRoutingEligible}
       />
     </form>
   );
