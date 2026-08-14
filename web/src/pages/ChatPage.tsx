@@ -2209,7 +2209,6 @@ function MainAgentSurface({
             subagentRoutingEligible={subagentRoutingEligible}
             subAgentLabel={subAgentLabel}
             wrapperLabel={wrapperLabel}
-            onGrowthChange={publishComposerGrowth}
           />
 
           {/* Chat/Terminal toggle for terminal-first sessions, reconnect-or-
