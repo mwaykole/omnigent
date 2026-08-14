@@ -9858,7 +9858,7 @@ def _build_spawn_env_from_spec(
         elif harness == "nemotron":
             model = getattr(effective_spec.executor, "model", None) if effective_spec.executor else None
             _nv_api_key = os.environ.get("NVIDIA_API_KEY", "")
-            env: dict[str, str] = {
+            env = {
                 "HARNESS_NEMOTRON_MODEL": model or "nvidia/nemotron-3-super-120b-a12b",
                 "HARNESS_NEMOTRON_BASE_URL": "https://integrate.api.nvidia.com/v1",
                 "OPENAI_BASE_URL": "https://integrate.api.nvidia.com/v1",

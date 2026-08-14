@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { ArrowDownIcon, ArrowUpIcon, Loader2Icon } from "lucide-react";
-import { type SessionUsage, useUsageReport } from "@/hooks/useUsageReport";
+import { useUsageReport } from "@/hooks/useUsageReport";
+import type { SessionUsage } from "@/lib/usageApi";
 import { shortModelName } from "@/components/CostRoutingControl";
 import { cn } from "@/lib/utils";
 
@@ -34,8 +35,8 @@ export function UsageSection() {
     const sessions = [...data.sessions];
     sessions.sort((a, b) => {
       const mul = sortDir === "desc" ? -1 : 1;
-      if (sortField === "cost") return mul * (a.cost_usd - b.cost_usd);
-      return mul * (a.updated_at - b.updated_at);
+      if (sortField === "cost") return mul * (a.costUsd - b.costUsd);
+      return mul * (a.updatedAt - b.updatedAt);
     });
     return sessions;
   }, [data, sortField, sortDir]);
@@ -83,10 +84,10 @@ export function UsageSection() {
       </p>
 
       <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
-        <CostCard label="Today" cost={data.cost_today} />
-        <CostCard label="Last 7 days" cost={data.cost_last_7d} />
-        <CostCard label="Last 30 days" cost={data.cost_last_30d} />
-        <CostCard label="All time" cost={data.total_cost_usd} highlight />
+        <CostCard label="Today" cost={data.costToday} />
+        <CostCard label="Last 7 days" cost={data.costLast7d} />
+        <CostCard label="Last 30 days" cost={data.costLast30d} />
+        <CostCard label="All time" cost={data.totalCostUsd} highlight />
       </div>
 
       <div className="mt-8">
@@ -219,10 +220,10 @@ function SessionRow({ session }: { session: SessionUsage }) {
         </div>
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
-        {relativeTime(session.updated_at)}
+        {relativeTime(session.updatedAt)}
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums font-medium">
-        {fmtCost(session.cost_usd)}
+        {fmtCost(session.costUsd)}
       </td>
     </tr>
   );

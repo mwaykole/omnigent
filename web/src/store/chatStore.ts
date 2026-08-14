@@ -2597,6 +2597,8 @@ function nativeModelFamilyForSession(session: Pick<Session, "labels">): NativeMo
     case "claude-code-native-ui":
       return "claude";
     case "codex-native-ui":
+    case "ollama-native-ui":
+    case "nemotron-native-ui":
       return "codex";
     default:
       return null;

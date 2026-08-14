@@ -373,7 +373,7 @@ def _materialize_nemotron_agent_spec(
     *,
     model: str | None = None,
 ) -> Path:
-    """Write the agent spec for the Nemotron (OpenRouter) native UI harness."""
+    """Write the agent spec for the Nemotron (NVIDIA API) native UI harness."""
     import yaml
 
     yaml_path = tmpdir / "nemotron-native-ui.yaml"
@@ -383,7 +383,7 @@ def _materialize_nemotron_agent_spec(
     raw = {
         "name": "nemotron-native-ui",
         "prompt": (
-            "Nemotron is running via OpenRouter API. Web UI messages are "
+            "Nemotron is running via NVIDIA API. Web UI messages are "
             "forwarded into the in-process executor configured for "
             "NVIDIA Nemotron models."
         ),

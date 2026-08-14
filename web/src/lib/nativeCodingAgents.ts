@@ -199,6 +199,7 @@ export const NATIVE_CODING_AGENTS = [
     displayName: "Nemotron",
     iconKind: "nemotron",
     sortRank: 56,
+    capabilities: ["approvalMode"],
   },
 ] as const satisfies readonly NativeCodingAgentSpec[];
 
