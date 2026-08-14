@@ -88,6 +88,25 @@ _REPL_TERMINAL_SESSION_KEY = "main"
 _NO_BODY_STATUS_CODES = {204, 304}
 
 
+def _maybe_wrap_openshell(spec: Any) -> Any:
+    """Wrap a TerminalEnvSpec command with ``openshell sandbox create --``.
+
+    Returns the spec unchanged when the ``openshell`` binary is not on PATH.
+    """
+    from omnigent.onboarding.harness_readiness import resolve_cli_binary
+
+    openshell_path = resolve_cli_binary("openshell")
+    if openshell_path is None:
+        _logger.warning("OpenShell sandbox requested but 'openshell' not found on PATH")
+        return spec
+    original_cmd = spec.command or ""
+    return dataclasses.replace(
+        spec,
+        command=str(openshell_path),
+        args=["sandbox", "create", "--", original_cmd, *spec.args],
+    )
+
+
 class _EnsureCommentRelay(Protocol):
     """Callable contract for starting a session's native tool relay."""
 
@@ -464,6 +483,7 @@ class _CodexNativeLaunchConfig:
     fork_source_external_id: str | None
     fork_carry_history: bool
     bypass_sandbox: bool
+    openshell_sandbox: bool = False
     auto_harness: bool = False
     routing_enabled: bool = False
     turn_routing: bool = False
@@ -507,6 +527,7 @@ class _PiNativeLaunchConfig:
     fork_source_external_id: str | None = None
     fork_carry_history: bool = False
     model_override: str | None = None
+    openshell_sandbox: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -517,6 +538,7 @@ class _KiroNativeLaunchConfig:
     terminal_launch_args: list[str] | None
     external_session_id: str | None
     model_override: str | None = None
+    openshell_sandbox: bool = False
 
 
 class _NativeRouterLaunch(NamedTuple):
@@ -818,6 +840,12 @@ async def _kiro_native_launch_config(
             raise RuntimeError(
                 f"Invalid model_override for Kiro session {session_id!r}: {exc}"
             ) from exc
+    from omnigent.stores.conversation_store import OPENSHELL_SANDBOX_LABEL_KEY
+
+    labels = snapshot.get("labels")
+    openshell_sandbox = (
+        isinstance(labels, dict) and labels.get(OPENSHELL_SANDBOX_LABEL_KEY) == "1"
+    )
     return _KiroNativeLaunchConfig(
         workspace=_kiro_session_workspace(session_workspace),
         terminal_launch_args=terminal_launch_args,
@@ -825,6 +853,7 @@ async def _kiro_native_launch_config(
         if isinstance(external_session_id, str)
         else None,
         model_override=model_override if isinstance(model_override, str) else None,
+        openshell_sandbox=openshell_sandbox,
     )
 
 
@@ -890,11 +919,13 @@ async def _pi_native_launch_config(
         FORK_CARRY_HISTORY_LABEL_KEY,
         FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
         FORK_SOURCE_LABEL_KEY,
+        OPENSHELL_SANDBOX_LABEL_KEY,
     )
 
     fork_source_id: str | None = None
     fork_source_external_id: str | None = None
     fork_carry_history = False
+    openshell_sandbox = False
     labels = snapshot.get("labels")
     if isinstance(labels, dict):
         _fsi = labels.get(FORK_SOURCE_LABEL_KEY)
@@ -904,6 +935,7 @@ async def _pi_native_launch_config(
         if isinstance(_fse, str) and _fse:
             fork_source_external_id = _fse
         fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
+        openshell_sandbox = labels.get(OPENSHELL_SANDBOX_LABEL_KEY) == "1"
     model_override = snapshot.get("model_override")
     if model_override is not None:
         if not isinstance(model_override, str) or not model_override:
@@ -923,6 +955,7 @@ async def _pi_native_launch_config(
         fork_source_external_id=fork_source_external_id,
         fork_carry_history=fork_carry_history,
         model_override=model_override,
+        openshell_sandbox=openshell_sandbox,
     )
 
 
@@ -1008,6 +1041,7 @@ async def _codex_native_launch_config(
         FORK_CARRY_HISTORY_LABEL_KEY,
         FORK_SOURCE_EXTERNAL_SESSION_LABEL_KEY,
         FORK_SOURCE_LABEL_KEY,
+        OPENSHELL_SANDBOX_LABEL_KEY,
     )
 
     fork_source_id: str | None = None
@@ -1019,6 +1053,7 @@ async def _codex_native_launch_config(
     # conversation label ("1" to enable). Read here so the runner applies
     # it at launch; any other value (incl. absent) leaves the normal stance.
     bypass_sandbox = False
+    openshell_sandbox = False
     labels = snapshot.get("labels")
     if isinstance(labels, dict):
         _fsi = labels.get(FORK_SOURCE_LABEL_KEY)
@@ -1029,6 +1064,7 @@ async def _codex_native_launch_config(
             fork_source_external_id = _fse
         fork_carry_history = labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
         bypass_sandbox = labels.get(CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY) == "1"
+        openshell_sandbox = labels.get(OPENSHELL_SANDBOX_LABEL_KEY) == "1"
     # One derivation of the session's Smart Routing class, shared with the SDK
     # codex path, so "pinned" and "auto-harness" mean the same on both.
     routing_class = routing_class_from_snapshot(
@@ -1046,6 +1082,7 @@ async def _codex_native_launch_config(
         fork_source_external_id=fork_source_external_id,
         fork_carry_history=fork_carry_history,
         bypass_sandbox=bypass_sandbox,
+        openshell_sandbox=openshell_sandbox,
         auto_harness=routing_class.auto_harness,
         routing_enabled=routing_class.routing_enabled,
         turn_routing=routing_class.turn_routing,
@@ -1074,6 +1111,7 @@ class _OpenCodeNativeLaunchConfig:
     model_override: str | None
     external_session_id: str | None
     fork_carry_history: bool = False
+    openshell_sandbox: bool = False
 
 
 async def _opencode_native_launch_config(
@@ -1143,11 +1181,17 @@ async def _opencode_native_launch_config(
     # On a forked clone, the server stamps carry-history (opencode has no native
     # session to clone, so the runner rehydrates the copied transcript as a
     # noReply preamble — same path as a lost-session resume).
-    from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
+    from omnigent.stores.conversation_store import (
+        FORK_CARRY_HISTORY_LABEL_KEY,
+        OPENSHELL_SANDBOX_LABEL_KEY,
+    )
 
     labels = snapshot.get("labels")
     fork_carry_history = (
         isinstance(labels, dict) and labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
+    )
+    openshell_sandbox = (
+        isinstance(labels, dict) and labels.get(OPENSHELL_SANDBOX_LABEL_KEY) == "1"
     )
     return _OpenCodeNativeLaunchConfig(
         workspace=_codex_session_workspace(session_workspace),
@@ -1156,6 +1200,7 @@ async def _opencode_native_launch_config(
         model_override=model_override,
         external_session_id=external_session_id,
         fork_carry_history=fork_carry_history,
+        openshell_sandbox=openshell_sandbox,
     )
 
 
@@ -1440,6 +1485,26 @@ async def _auto_create_opencode_terminal(
         _register_auto_forwarder_task(session_id, forwarder_task)
 
     agent_os_env = _agent_os_env_from_spec(agent_spec)
+    opencode_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=workspace,
+            sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+        ),
+        command=server.opencode_path,
+        args=build_opencode_attach_args(
+            server_url=server.base_url,
+            workspace=workspace,
+            session_id=opencode_session_id,
+            opencode_args=tuple(launch_config.terminal_launch_args or ()),
+        ),
+        env=opencode_terminal_env(server),
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        opencode_spec = _maybe_wrap_openshell(opencode_spec)
     try:
         terminal_view = await resource_registry.launch_auxiliary_terminal(
             session_id=session_id,
@@ -1447,24 +1512,7 @@ async def _auto_create_opencode_terminal(
             session_key="main",
             resource_role=OPENCODE_NATIVE_TERMINAL_ROLE,
             parent_os_env=agent_os_env,
-            spec=TerminalEnvSpec(
-                os_env=OSEnvSpec(
-                    type="caller_process",
-                    cwd=workspace,
-                    sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
-                ),
-                command=server.opencode_path,
-                args=build_opencode_attach_args(
-                    server_url=server.base_url,
-                    workspace=workspace,
-                    session_id=opencode_session_id,
-                    opencode_args=tuple(launch_config.terminal_launch_args or ()),
-                ),
-                env=opencode_terminal_env(server),
-                scrollback=100_000,
-                tmux_allow_passthrough=True,
-                tmux_start_on_attach=False,
-            ),
+            spec=opencode_spec,
         )
         publish_event(
             session_id,
@@ -2180,25 +2228,28 @@ async def _auto_create_pi_terminal(
     # and ``parent_os_env`` below, launch_required_terminal falls back to
     # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
     agent_os_env = _agent_os_env_from_spec(agent_spec)
+    pi_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=workspace,
+            sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+        ),
+        command=pi_command,
+        args=pi_args,
+        env=pi_env,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        pi_spec = _maybe_wrap_openshell(pi_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="pi",
         session_key="main",
         resource_role=PI_NATIVE_TERMINAL_ROLE,
         parent_os_env=agent_os_env,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(
-                type="caller_process",
-                cwd=workspace,
-                sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
-            ),
-            command=pi_command,
-            args=pi_args,
-            env=pi_env,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=pi_spec,
     )
     publish_event(
         session_id,
@@ -2443,20 +2494,23 @@ async def _auto_create_cursor_terminal(
         model = launch_config.model_override or _cursor_native_model_from_spec(agent_spec)
         if model is not None:
             cursor_args.extend(["--model", model])
+    cursor_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=cursor_command,
+        args=cursor_args,
+        env={},
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        cursor_spec = _maybe_wrap_openshell(cursor_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="cursor",
         session_key="main",
         resource_role=CURSOR_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=cursor_command,
-            args=cursor_args,
-            env={},
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=cursor_spec,
     )
     # Advertise the tmux socket+target so the cursor-native harness executor can
     # inject web-UI messages into this same pane (tmux paste), wiring the web
@@ -2642,25 +2696,28 @@ async def _auto_create_goose_terminal(
         goose_session_name,
         *(launch_config.terminal_launch_args or []),
     ]
+    goose_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=goose_command,
+        args=goose_args,
+        # ANSI theme keeps the pane cheap to scrape; GOOSE_TELEMETRY_OFF
+        # suppresses Goose's first-run "share usage data?" prompt, which
+        # would otherwise block the headless pane on a fresh install;
+        # GOOSE_MODE=smart_approve turns on Goose's own in-TUI approval. Goose's
+        # provider/model come from the user's own `goose configure` (KTD4).
+        env=goose_env,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        goose_spec = _maybe_wrap_openshell(goose_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="goose",
         session_key="main",
         resource_role=GOOSE_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=goose_command,
-            args=goose_args,
-            # ANSI theme keeps the pane cheap to scrape; GOOSE_TELEMETRY_OFF
-            # suppresses Goose's first-run "share usage data?" prompt, which
-            # would otherwise block the headless pane on a fresh install;
-            # GOOSE_MODE=smart_approve turns on Goose's own in-TUI approval. Goose's
-            # provider/model come from the user's own `goose configure` (KTD4).
-            env=goose_env,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=goose_spec,
     )
     # Advertise the tmux socket+target so the goose-native harness executor can
     # inject web-UI messages into this same pane (tmux paste).
@@ -2880,20 +2937,23 @@ async def _auto_create_hermes_terminal(
     _hermes_terminal_env: dict[str, str] = {}
     if _hermes_home_path is not None:
         _hermes_terminal_env["HERMES_HOME"] = str(_hermes_home_path)
+    hermes_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=hermes_command,
+        args=hermes_args,
+        env=_hermes_terminal_env,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        hermes_spec = _maybe_wrap_openshell(hermes_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="hermes",
         session_key="main",
         resource_role=HERMES_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=hermes_command,
-            args=hermes_args,
-            env=_hermes_terminal_env,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=hermes_spec,
     )
     # Advertise the tmux socket+target so the hermes-native harness executor can
     # inject web-UI messages into this same pane (tmux paste).
@@ -3034,22 +3094,25 @@ async def _auto_create_kiro_terminal(
         model=launch_config.model_override,
     )
     launch_epoch_ms = int(time.time() * 1000)
+    kiro_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=kiro_launch.executable,
+        args=kiro_launch.argv[1:],
+        env=build_kiro_native_terminal_env(session_id),
+        env_unset=list(KIRO_NATIVE_ENV_UNSET),
+        inherit_env=False,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        kiro_spec = _maybe_wrap_openshell(kiro_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="kiro",
         session_key="main",
         resource_role=KIRO_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=kiro_launch.executable,
-            args=kiro_launch.argv[1:],
-            env=build_kiro_native_terminal_env(session_id),
-            env_unset=list(KIRO_NATIVE_ENV_UNSET),
-            inherit_env=False,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=kiro_spec,
     )
     terminal_registry = resource_registry.terminal_registry
     if terminal_registry is not None:
@@ -3404,19 +3467,22 @@ async def _auto_create_qwen_terminal(
         "--json-file",
         str(out_path),
     ]
+    qwen_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=qwen_command,
+        args=qwen_args,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        qwen_spec = _maybe_wrap_openshell(qwen_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="qwen",
         session_key="main",
         resource_role=QWEN_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=qwen_command,
-            args=qwen_args,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=qwen_spec,
     )
     # Advertise the tmux socket+target so interrupt (Escape) / stop (kill) can
     # reach this pane — message injection itself is file-based, not tmux.
@@ -3618,20 +3684,23 @@ async def _auto_create_kimi_terminal(
         bridge_dir / "kimi-code-home",
         bridge_dir=bridge_dir,
     )
+    kimi_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(type="caller_process", cwd=workspace),
+        command=kimi_command,
+        args=kimi_args,
+        env=kimi_env,
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        kimi_spec = _maybe_wrap_openshell(kimi_spec)
     terminal_view = await resource_registry.launch_required_terminal(
         session_id=session_id,
         terminal_name="kimi",
         session_key="main",
         resource_role=KIMI_NATIVE_TERMINAL_ROLE,
-        spec=TerminalEnvSpec(
-            os_env=OSEnvSpec(type="caller_process", cwd=workspace),
-            command=kimi_command,
-            args=kimi_args,
-            env=kimi_env,
-            scrollback=100_000,
-            tmux_allow_passthrough=True,
-            tmux_start_on_attach=False,
-        ),
+        spec=kimi_spec,
     )
     # Advertise the tmux socket+target so the kimi-native harness executor can
     # inject web-UI messages into this same pane (tmux paste), wiring the web
@@ -4096,6 +4165,31 @@ async def _auto_create_codex_terminal(
     # and ``parent_os_env`` below, launch_terminal falls back to
     # _default_sandbox_for_platform (linux_bwrap), overriding the YAML config.
     agent_os_env = _agent_os_env_from_spec(agent_spec)
+    codex_spec = TerminalEnvSpec(
+        os_env=OSEnvSpec(
+            type="caller_process",
+            cwd=workspace,
+            sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
+        ),
+        command=app_server.codex_path,
+        args=build_codex_remote_args(
+            codex_args=tuple(launch_config.terminal_launch_args or ()),
+            thread_id=launch_config.external_session_id,
+            remote_url=codex_ws_url,
+            bypass_sandbox=launch_config.bypass_sandbox,
+            config_overrides=tuple(app_server.config_overrides),
+            bypass_hook_trust=(
+                app_server.codex_cli_version is not None
+                and app_server.codex_cli_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
+            ),
+        ),
+        env=codex_terminal_env(app_server),
+        scrollback=100_000,
+        tmux_allow_passthrough=True,
+        tmux_start_on_attach=False,
+    )
+    if launch_config.openshell_sandbox:
+        codex_spec = _maybe_wrap_openshell(codex_spec)
     try:
         terminal_view = await resource_registry.launch_auxiliary_terminal(
             session_id=session_id,
@@ -4103,64 +4197,7 @@ async def _auto_create_codex_terminal(
             session_key="main",
             resource_role=CODEX_NATIVE_TERMINAL_ROLE,
             parent_os_env=agent_os_env,
-            spec=TerminalEnvSpec(
-                os_env=OSEnvSpec(
-                    type="caller_process",
-                    cwd=workspace,
-                    sandbox=(agent_os_env.sandbox if agent_os_env is not None else None),
-                ),
-                command=app_server.codex_path,
-                # Fresh sessions pass no thread id so the TUI creates the
-                # thread and the background task adopts it. Resume sessions
-                # pass the persisted external_session_id so the runner-owned
-                # TUI reopens the existing app-server thread.
-                args=build_codex_remote_args(
-                    codex_args=tuple(launch_config.terminal_launch_args or ()),
-                    thread_id=launch_config.external_session_id,
-                    remote_url=codex_ws_url,
-                    bypass_sandbox=launch_config.bypass_sandbox,
-                    # The --remote TUI loads its own config and does not
-                    # inherit the app-server's -c flags; pass the same
-                    # provider/model overrides so it resolves the
-                    # Omnigent provider instead of falling back to the
-                    # OpenAI built-in (which would force the first-run
-                    # login screen and block thread creation).
-                    config_overrides=tuple(app_server.config_overrides),
-                    # Omnigent provisions the private CODEX_HOME and vets
-                    # hook sources itself; skip the interactive trust prompt
-                    # that headless sub-agents can never answer.
-                    #
-                    # Requires a *positively parsed* version, unlike the
-                    # hooks-file gate in ``codex_native_app_server``, which
-                    # treats an unknown version as supported. The two differ
-                    # because their failure modes do: an unsupported hooks
-                    # file is ignored by codex and caught downstream at the
-                    # trust check, whereas an unknown CLI flag aborts argv
-                    # parsing — so a transient ``codex --version`` hiccup on a
-                    # pre-0.131 codex would turn a recoverable trust prompt
-                    # into a dead terminal.
-                    bypass_hook_trust=(
-                        app_server.codex_cli_version is not None
-                        and app_server.codex_cli_version >= _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION
-                    ),
-                ),
-                env=codex_terminal_env(app_server),
-                # Match the local ``omnigent codex`` terminal scrollback.
-                scrollback=100_000,
-                # Enable tmux passthrough so the Codex TUI's escape sequences
-                # reach the web xterm.
-                tmux_allow_passthrough=True,
-                # Start the TUI at creation rather than on first attach,
-                # mirroring claude-native. Deferring to attach (the local CLI
-                # default) means the full-screen TUI cold-starts the instant
-                # the web UI attaches over the runner tunnel; that initial
-                # render burst starves the tunnel ping/pong and the host
-                # recycles the unresponsive runner (the "runner
-                # death on terminal attach" class). Starting now lets the TUI settle
-                # in the detached tmux pane (no tunnel traffic) and create its
-                # thread before anyone attaches.
-                tmux_start_on_attach=False,
-            ),
+            spec=codex_spec,
         )
         publish_event(
             session_id,
@@ -6569,29 +6606,18 @@ async def _auto_create_claude_terminal(
         ),
         command=launch_command,
         args=launch_args,
-        # Tool Search env plus ucode gateway env (ANTHROPIC_BASE_URL
-        # etc.) when derived. Empty provider config still forces
-        # ENABLE_TOOL_SEARCH=true so MCP schemas are loaded on demand.
         env=build_native_claude_terminal_env(claude_config),
-        # Names to strip (see ``_claude_terminal_env_unset``). Dropping
-        # ``DATABRICKS_CONFIG_PROFILE`` matters because Claude's MCP servers
-        # inherit this env and several build ``WorkspaceClient`` without pinning
-        # ``auth_type``: a set profile makes the SDK prefer that profile's cached
-        # OAuth token over the MCP's explicit token, 400ing against the wrong
-        # workspace. Claude itself ignores the var (routing is
-        # ``ANTHROPIC_BASE_URL`` / ``apiKeyHelper``), so this affects only MCPs;
-        # ones needing a specific profile must set it in their own per-MCP env.
         env_unset=claude_terminal_env_unset,
         scrollback=50000,
-        # Keep the private tmux server alive if the `claude` CLI exits (e.g. a
-        # sub-agent worker whose CLI exits right after rendering its prompt on
-        # some hosts — #540). Without this, that exit reaps the server and every
-        # later control command (send-keys / model / effort / interrupt / stop)
-        # fails with "no server running", and the delegated message is silently
-        # lost. With it, the dead pane persists (capturable for diagnostics) and
-        # the watcher reports the exit deterministically via `#{pane_dead}`.
         keep_alive_after_exit=True,
     )
+    # Wrap the claude CLI with OpenShell when the session label is set.
+    if session_init is not None:
+        from omnigent.stores.conversation_store import OPENSHELL_SANDBOX_LABEL_KEY
+
+        _os_labels = session_init.snapshot.labels or {}
+        if _os_labels.get(OPENSHELL_SANDBOX_LABEL_KEY) == "1":
+            env_spec = _maybe_wrap_openshell(env_spec)
     _logger.info(
         "Claude terminal tmux launch requested: session=%s command=%s args_count=%d "
         "env_keys=%s cwd=%s scrollback=%d",

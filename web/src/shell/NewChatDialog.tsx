@@ -66,6 +66,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { authenticatedFetch } from "@/lib/identity";
 import { isImeCompositionKeyEvent } from "@/lib/ime";
@@ -363,6 +364,7 @@ const CODEX_NATIVE_APPROVAL_MODES: {
 // approval-mode presets above: when bypass is on the runner strips any
 // `--sandbox` / `--ask-for-approval` flags those presets would emit.
 const CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY = "omnigent.codex_native.bypass_sandbox";
+const OPENSHELL_SANDBOX_LABEL_KEY = "omnigent.openshell_sandbox";
 // Bypass is the most-permissive Codex approval stance — presented as a 4th
 // option in the Codex approval dropdown (Codex only; OpenCode shares the
 // presets above but has no bypass). It rides as a conversation label, not
@@ -1386,6 +1388,7 @@ function HarnessConfigModal({
   cursorExecMode,
   agySkipMode,
   bypassSandbox,
+  openshellSandbox,
   pickedModel,
   claudeModelOptions,
   claudeModelsLoading,
@@ -1399,6 +1402,7 @@ function HarnessConfigModal({
   setCursorExecMode,
   setAgySkipMode,
   setBypassSandbox,
+  setOpenshellSandbox,
   setPickedModel,
   setPickedEffort,
   setPickedHarness,
@@ -1416,6 +1420,7 @@ function HarnessConfigModal({
   cursorExecMode: string;
   agySkipMode: string;
   bypassSandbox: boolean;
+  openshellSandbox: boolean;
   pickedModel: string;
   claudeModelOptions: readonly Pick<NativeModelOption, "id" | "displayName" | "isDefault">[];
   claudeModelsLoading: boolean;
@@ -1429,6 +1434,7 @@ function HarnessConfigModal({
   setCursorExecMode: (mode: string) => void;
   setAgySkipMode: (mode: string) => void;
   setBypassSandbox: (enabled: boolean) => void;
+  setOpenshellSandbox: (enabled: boolean) => void;
   setPickedModel: (model: string) => void;
   setPickedEffort: (effort: string) => void;
   setPickedHarness: (harness: string | null, agentId?: string) => void;
@@ -1442,8 +1448,11 @@ function HarnessConfigModal({
   const hasApproval = nativeAgentHasCapability(agent, "approvalMode");
   const hasCursor = nativeAgentHasCapability(agent, "cursorMode");
   const hasAgySkip = nativeAgentHasCapability(agent, "skipPermissions");
-  const isCodexLike = entryHarness === "codex-native" || entryHarness === "ollama" || entryHarness === "nemotron";
+  const isCodexLike =
+    entryHarness === "codex-native" || entryHarness === "ollama" || entryHarness === "nemotron";
   const isCodex = entryHarness === "codex-native";
+  const isNativeCli =
+    entryHarness !== null && entryHarness !== "ollama" && entryHarness !== "nemotron";
   const modelOptions = isCodexLike ? codexModelOptions : claudeModelOptions;
   const modelsLoading = isCodexLike ? codexModelsLoading : claudeModelsLoading;
   const brainDefault =
@@ -1458,6 +1467,7 @@ function HarnessConfigModal({
   const [draftCursor, setDraftCursor] = useState(cursorExecMode);
   const [draftAgySkip, setDraftAgySkip] = useState(agySkipMode);
   const [draftBypass, setDraftBypass] = useState(bypassSandbox);
+  const [draftOpenshell, setDraftOpenshell] = useState(openshellSandbox);
   const [draftHarness, setDraftHarness] = useState<string | null>(pickedHarness);
   const [draftRouting, setDraftRouting] = useState<CostControlMode>(costControlMode);
 
@@ -1470,6 +1480,7 @@ function HarnessConfigModal({
     setDraftCursor(cursorExecMode);
     setDraftAgySkip(agySkipMode);
     setDraftBypass(bypassSandbox);
+    setDraftOpenshell(openshellSandbox);
     setDraftHarness(pickedHarness);
     setDraftRouting(costControlMode);
     // Seed once per open from the current live values.
@@ -1583,6 +1594,8 @@ function HarnessConfigModal({
           ...(draftRouting === "on" ? { model: "", effort: "" } : {}),
         });
     }
+    // OpenShell sandbox is independent of harness-specific capabilities.
+    setOpenshellSandbox(draftOpenshell);
     onOpenChange(false);
   };
 
@@ -1836,6 +1849,17 @@ function HarnessConfigModal({
               />
             </ConfigRow>
           )}
+
+          {!autoRouting && isNativeCli && (
+            <ConfigRow label="OpenShell" description="Run inside NVIDIA OpenShell sandbox">
+              <Switch
+                checked={draftOpenshell}
+                onCheckedChange={setDraftOpenshell}
+                data-testid="new-chat-landing-config-openshell"
+                aria-label="OpenShell sandbox"
+              />
+            </ConfigRow>
+          )}
         </div>
 
         <DialogFooter className="border-t-0 bg-transparent">
@@ -1878,6 +1902,7 @@ interface LandingDraft {
   bypassSandbox: boolean;
   cursorExecMode: string;
   agySkipMode: string;
+  openshellSandbox: boolean;
   pickedHarness: string | null;
   pickedModel: string;
   pickedEffort: string;
@@ -2091,8 +2116,11 @@ export function NewChatLandingScreen() {
     "codex-native",
     !sandboxSelected,
   );
-  const { data: hostOllamaModelOptions, isLoading: hostOllamaModelsLoading } =
-    useHostModelOptions(selectedHostId, "ollama", !sandboxSelected);
+  const { data: hostOllamaModelOptions, isLoading: hostOllamaModelsLoading } = useHostModelOptions(
+    selectedHostId,
+    "ollama",
+    !sandboxSelected,
+  );
   const { data: hostNemotronModelOptions, isLoading: hostNemotronModelsLoading } =
     useHostModelOptions(selectedHostId, "nemotron", !sandboxSelected);
   const claudeModelOptions = useMemo(
@@ -2199,6 +2227,9 @@ export function NewChatLandingScreen() {
   const [agySkipMode, setAgySkipMode] = useState<string>(
     () => landingDraft?.agySkipMode ?? AGY_NATIVE_DEFAULT_SKIP_MODE,
   );
+  const [openshellSandbox, setOpenshellSandbox] = useState<boolean>(
+    () => landingDraft?.openshellSandbox ?? false,
+  );
   // Per-session brain-harness override for bundle agents (polly / debby).
   // null = the agent spec's declared harness (no override sent). On agent
   // switch, seeded from the user's last stored pick for that agent.
@@ -2276,6 +2307,7 @@ export function NewChatLandingScreen() {
     bypassSandbox,
     cursorExecMode,
     agySkipMode,
+    openshellSandbox,
     pickedHarness,
     pickedModel,
     pickedEffort,
@@ -2691,11 +2723,16 @@ export function NewChatLandingScreen() {
   // (drives the gear icon's visibility). Bundle agents with an overridable
   // brain harness qualify, as does any routing-eligible agent — Smart Routing
   // lives only in the modal, so an agent with just that still needs the gear.
+  const isSelectedNativeCli =
+    selectedNativeHarness !== null &&
+    selectedNativeHarness !== "ollama" &&
+    selectedNativeHarness !== "nemotron";
   const selectedAgentHasKnobs =
     supportsPermissionMode ||
     supportsApprovalMode ||
     supportsCursorMode ||
     supportsAgySkipPermissions ||
+    isSelectedNativeCli ||
     smartRoutingEligible ||
     (selectedAgent?.harness != null && selectedAgent.harness in brainHarnessLabelsAll);
   // Label/value pairs summarizing the selected agent's current run-config, for
@@ -2716,11 +2753,14 @@ export function NewChatLandingScreen() {
       selectedAgent?.harness != null &&
       selectedAgent.harness in brainHarnessLabelsAll);
   const configSummary = useMemo((): { label: string; value: string }[] => {
+    const openshellRow: { label: string; value: string }[] = openshellSandbox
+      ? [{ label: "OpenShell", value: "On" }]
+      : [];
     if (smartRoutingHarnessSelected) {
       // Top-level Smart Routing's modal is the locked Permissions row alone, so
       // mirror it. Report the constant — never a mode left over in state from a
       // previously selected native harness.
-      return [{ label: "Permissions", value: AUTO_PERMISSION_MODE.label }];
+      return [{ label: "Permissions", value: AUTO_PERMISSION_MODE.label }, ...openshellRow];
     }
     if (supportsPermissionMode) {
       const modelValue = routingOn
@@ -2740,6 +2780,7 @@ export function NewChatLandingScreen() {
         { label: "Model", value: modelValue },
         { label: "Effort", value: effortValue },
         { label: "Permissions", value: permissionValue },
+        ...openshellRow,
       ];
     }
     // Codex folds routing into its Model row, so report it the same way Claude
@@ -2761,7 +2802,11 @@ export function NewChatLandingScreen() {
           : (CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.label ??
             approvalMode);
       const activeModelOptions =
-        summaryHarness === "nemotron" ? nemotronModelOptions : summaryHarness === "ollama" ? ollamaModelOptions : codexModelOptions;
+        summaryHarness === "nemotron"
+          ? nemotronModelOptions
+          : summaryHarness === "ollama"
+            ? ollamaModelOptions
+            : codexModelOptions;
       const modelRows =
         routingOn || !isCodexLike
           ? routingRow
@@ -2773,26 +2818,27 @@ export function NewChatLandingScreen() {
                   defaultModelLabel(activeModelOptions, displayModelId),
               },
             ];
-      return [...modelRows, { label: "Approval", value: approvalValue }];
+      return [...modelRows, { label: "Approval", value: approvalValue }, ...openshellRow];
     }
     if (supportsCursorMode) {
       const modeValue =
         CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.label ?? cursorExecMode;
-      return [{ label: "Mode", value: modeValue }, ...routingRow];
+      return [{ label: "Mode", value: modeValue }, ...routingRow, ...openshellRow];
     }
     if (supportsAgySkipPermissions) {
       const skipValue =
         AGY_NATIVE_SKIP_MODES.find((m) => m.value === agySkipMode)?.label ?? agySkipMode;
-      return [{ label: "Permissions", value: skipValue }, ...routingRow];
+      return [{ label: "Permissions", value: skipValue }, ...routingRow, ...openshellRow];
     }
     if (selectedAgent?.harness != null && selectedAgent.harness in brainHarnessLabelsAll) {
       const active = pickedHarness ?? selectedAgent.harness;
       return [
         { label: "Agent Harness", value: brainHarnessLabelsAll[active] ?? active },
         ...routingRow,
+        ...openshellRow,
       ];
     }
-    return routingRow;
+    return [...routingRow, ...openshellRow];
   }, [
     smartRoutingHarnessSelected,
     supportsPermissionMode,
@@ -2811,6 +2857,7 @@ export function NewChatLandingScreen() {
     permissionMode,
     approvalMode,
     bypassSandbox,
+    openshellSandbox,
     cursorExecMode,
     agySkipMode,
     pickedHarness,
@@ -2884,10 +2931,16 @@ export function NewChatLandingScreen() {
       // also drops any model/effort left in the shared state (e.g. seeded for
       // Claude Code before the harness switch).
       const seedModelOptions =
-        selectedNativeHarness === "nemotron" ? nemotronModelOptions : selectedNativeHarness === "ollama" ? ollamaModelOptions : codexModelOptions;
+        selectedNativeHarness === "nemotron"
+          ? nemotronModelOptions
+          : selectedNativeHarness === "ollama"
+            ? ollamaModelOptions
+            : codexModelOptions;
       setPickedModel(
         !storedRoutingOn &&
-          (selectedNativeHarness === "codex-native" || selectedNativeHarness === "ollama" || selectedNativeHarness === "nemotron") &&
+          (selectedNativeHarness === "codex-native" ||
+            selectedNativeHarness === "ollama" ||
+            selectedNativeHarness === "nemotron") &&
           stored.model != null &&
           seedModelOptions.some((m) => m.id === stored.model)
           ? stored.model
@@ -2902,7 +2955,13 @@ export function NewChatLandingScreen() {
     // Reseed on harness changes and when the selected host's catalog resolves;
     // capability flags are derived from the same harness and stay omitted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNativeHarness, claudeModelOptions, codexModelOptions, ollamaModelOptions, nemotronModelOptions]);
+  }, [
+    selectedNativeHarness,
+    claudeModelOptions,
+    codexModelOptions,
+    ollamaModelOptions,
+    nemotronModelOptions,
+  ]);
   // Smart Routing is remembered per harness alongside the mode/model
   // knobs, in its own effect because eligibility depends on the server flag
   // (which resolves after mount — this must reseed when it lands). A stored
@@ -3647,16 +3706,13 @@ export function NewChatLandingScreen() {
       // when the toggle is armed for a codex-native agent) so the runner
       // launches with --dangerously-bypass-approvals-and-sandbox and the choice
       // survives reload.
-      const baseLabels =
+      let baseLabels =
         agentSupportsApprovalMode && bypassSandbox
           ? { ...(nativeLabels ?? {}), [CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY]: "1" }
           : nativeLabels;
-      // When filing into a project, stamp its legacy `omni_project` label at
-      // create so the session is BORN FILED. The sidebar dual-reads project
-      // membership from this label OR the first-class `project_id` the follow-up
-      // move sets, so the row groups under its project from its very first
-      // sidebar appearance instead of flashing through the ungrouped "Sessions"
-      // section while the search-indexed session list catches up to the move.
+      if (openshellSandbox) {
+        baseLabels = { ...(baseLabels ?? {}), [OPENSHELL_SANDBOX_LABEL_KEY]: "1" };
+      }
       const createLabels = selectedProject
         ? { ...(baseLabels ?? {}), [PROJECT_LABEL_KEY]: selectedProject }
         : baseLabels;
@@ -4339,6 +4395,7 @@ export function NewChatLandingScreen() {
                     cursorExecMode={cursorExecMode}
                     agySkipMode={agySkipMode}
                     bypassSandbox={bypassSandbox}
+                    openshellSandbox={openshellSandbox}
                     pickedModel={pickedModel}
                     claudeModelOptions={claudeModelOptions}
                     claudeModelsLoading={
@@ -4368,6 +4425,7 @@ export function NewChatLandingScreen() {
                     setCursorExecMode={setCursorExecMode}
                     setAgySkipMode={setAgySkipMode}
                     setBypassSandbox={setBypassSandbox}
+                    setOpenshellSandbox={setOpenshellSandbox}
                     setPickedModel={setPickedModel}
                     setPickedEffort={setPickedEffort}
                     setPickedHarness={handleSetPickedHarness}

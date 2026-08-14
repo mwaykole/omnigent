@@ -77,6 +77,11 @@ SWITCH_PREVIOUS_BUILTIN_LABEL_KEY = "omnigent.switch.previous_builtin_id"
 # normal approval/sandbox stance.
 CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY = "omnigent.codex_native.bypass_sandbox"
 
+# Per-session OpenShell sandbox opt-in. When set to ``"1"`` the runner wraps
+# the native CLI process with ``openshell sandbox create --``, so the agent
+# runs inside NVIDIA OpenShell's filesystem/network/process isolation.
+OPENSHELL_SANDBOX_LABEL_KEY = "omnigent.openshell_sandbox"
+
 # Reserved label key that stores a session's sidebar "project" membership
 # (implicit collections — a project exists while ≥1 session carries this key).
 # Namespaced so it never collides with the user-facing "project" term or other
@@ -167,6 +172,7 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
         "omnigent.last_context_tokens",
         "omnigent.last_context_window",
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
+        OPENSHELL_SANDBOX_LABEL_KEY,
     }
 )
 
