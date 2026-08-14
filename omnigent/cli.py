@@ -680,6 +680,7 @@ _LOCAL_DAEMON_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "OPENAI_BASE_URL",
         "OPENAI_ORG_ID",
         "OPENAI_ORGANIZATION",
+        "NVIDIA_API_KEY",
         "OPENROUTER_API_KEY",
         "PERPLEXITY_API_KEY",
         "TOGETHER_API_KEY",

@@ -2066,6 +2066,8 @@ def create_runner_app(
     _claude_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _antigravity_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     app.state.antigravity_terminal_ensure_locks = _antigravity_terminal_ensure_locks
+    _ollama_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
+    _nemotron_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _repl_terminal_ensure_locks: dict[str, asyncio.Lock] = {}
     _active_turns: dict[str, asyncio.Task[None] | None] = {}
     app.state.active_turns = _active_turns
@@ -2951,6 +2953,8 @@ def create_runner_app(
                 "hermes": _hermes_terminal_ensure_locks,
                 "qwen": _qwen_terminal_ensure_locks,
                 "kimi": _kimi_terminal_ensure_locks,
+                "ollama": _ollama_terminal_ensure_locks,
+                "nemotron": _nemotron_terminal_ensure_locks,
             }[_native_agent.key]
             _launch_ctx = NativeLaunchContext(
                 session_id=session_id,
@@ -3177,6 +3181,7 @@ def create_runner_app(
         if (
             spec is not None
             and not is_native_harness(harness_name)
+            and harness_name not in ("ollama", "nemotron")
             and not _sa_name
             and resource_registry.terminal_registry is not None
         ):
@@ -3447,6 +3452,8 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
+        _ollama_terminal_ensure_locks.pop(session_id, None)
+        _nemotron_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
         _interrupted_sessions.discard(session_id)
         await _cancel_auto_forwarder_task(session_id)
@@ -7296,6 +7303,8 @@ def create_runner_app(
                 "hermes": _hermes_terminal_ensure_locks,
                 "qwen": _qwen_terminal_ensure_locks,
                 "kimi": _kimi_terminal_ensure_locks,
+                "ollama": _ollama_terminal_ensure_locks,
+                "nemotron": _nemotron_terminal_ensure_locks,
             }[_ensure_agent.key]
             _ensure_ctx = NativeLaunchContext(
                 session_id=session_id,
@@ -7383,6 +7392,26 @@ def create_runner_app(
                     )
 
                 _ensure_build = _spec_ensure_build
+
+            elif terminal_name == "ollama":
+
+                async def _ollama_ensure_build(
+                    ctx: NativeLaunchContext,
+                ) -> NativeLaunchContext:
+                    ollama_agent_spec = await _resolve_session_agent_spec(session_id)
+                    return dataclasses.replace(ctx, agent_spec=ollama_agent_spec)
+
+                _ensure_build = _ollama_ensure_build
+
+            elif terminal_name == "nemotron":
+
+                async def _nemotron_ensure_build(
+                    ctx: NativeLaunchContext,
+                ) -> NativeLaunchContext:
+                    nemotron_agent_spec = await _resolve_session_agent_spec(session_id)
+                    return dataclasses.replace(ctx, agent_spec=nemotron_agent_spec)
+
+                _ensure_build = _nemotron_ensure_build
 
             elif terminal_name in ("cursor", "kimi"):
 
@@ -7708,6 +7737,8 @@ def create_runner_app(
         session_id: str, terminal_id: str
     ) -> TerminalListEntry | None:
         if resource_registry is None or resource_registry.terminal_registry is None:
+            return None
+        if _session_harness_name(session_id) in ("ollama", "nemotron"):
             return None
         registry = resource_registry.terminal_registry
         lock = _repl_terminal_ensure_locks.setdefault(session_id, asyncio.Lock())
@@ -8526,6 +8557,93 @@ def create_runner_app(
         }
         return JSONResponse(status_code=200, content={"models": models})
 
+    @app.get("/v1/sessions/{session_id}/ollama-model-options")
+    async def get_session_ollama_model_options(session_id: str) -> JSONResponse:
+        if _session_harness_name(session_id) != "ollama":
+            return JSONResponse(status_code=200, content={"models": []})
+        try:
+            import urllib.request
+            import json as _json
+
+            resp = await asyncio.to_thread(
+                lambda: urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5)
+            )
+            data = _json.loads(resp.read())
+            models: list[dict[str, object]] = []
+            for i, m in enumerate(data.get("models", [])):
+                name = m.get("name", "")
+                if name:
+                    models.append(
+                        {
+                            "id": name,
+                            "displayName": name,
+                            **({"isDefault": True} if i == 0 else {}),
+                        }
+                    )
+            return JSONResponse(status_code=200, content={"models": models})
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Ollama model discovery failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "ollama_model_options_failed",
+                    "detail": _client_safe_error_detail(
+                        exc, context="ollama model options"
+                    ),
+                },
+            )
+
+    @app.get("/v1/sessions/{session_id}/nemotron-model-options")
+    async def get_session_nemotron_model_options(session_id: str) -> JSONResponse:
+        if _session_harness_name(session_id) != "nemotron":
+            return JSONResponse(status_code=200, content={"models": []})
+        try:
+            import urllib.request
+            import json as _json
+
+            api_key = os.environ.get("NVIDIA_API_KEY", "")
+            req = urllib.request.Request(
+                "https://integrate.api.nvidia.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            resp = await asyncio.to_thread(
+                lambda: urllib.request.urlopen(req, timeout=10)
+            )
+            data = _json.loads(resp.read())
+            models: list[dict[str, object]] = []
+            is_first = True
+            for m in data.get("data", []):
+                mid = m.get("id", "")
+                if "nemotron" in mid.lower():
+                    models.append(
+                        {
+                            "id": mid,
+                            "displayName": mid,
+                            **({"isDefault": True} if is_first else {}),
+                        }
+                    )
+                    is_first = False
+            return JSONResponse(status_code=200, content={"models": models})
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "Nemotron model discovery failed for session=%s",
+                session_id,
+                exc_info=True,
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "nemotron_model_options_failed",
+                    "detail": _client_safe_error_detail(
+                        exc, context="nemotron model options"
+                    ),
+                },
+            )
+
     @app.get("/v1/sessions/{session_id}/claude-model-options")
     async def get_session_claude_model_options(session_id: str) -> JSONResponse:
         if _session_harness_name(session_id) != "claude-native":
@@ -8797,6 +8915,8 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
+        _ollama_terminal_ensure_locks.pop(session_id, None)
+        _nemotron_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
         await resource_registry.cleanup_session(session_id)
         await _delete_native_bridge_dirs(
@@ -8824,6 +8944,8 @@ def create_runner_app(
         _qwen_terminal_ensure_locks.pop(session_id, None)
         _kimi_terminal_ensure_locks.pop(session_id, None)
         _hermes_terminal_ensure_locks.pop(session_id, None)
+        _ollama_terminal_ensure_locks.pop(session_id, None)
+        _nemotron_terminal_ensure_locks.pop(session_id, None)
         _repl_terminal_ensure_locks.pop(session_id, None)
         await _teardown_session_terminals(session_id)
         await resource_registry.cleanup_session(session_id)
@@ -9727,6 +9849,23 @@ def _build_spawn_env_from_spec(
             env = _build_acp_spawn_env(effective_spec, cwd=cwd, workdir=workdir)
         elif harness == "copilot":
             env = _build_copilot_spawn_env(effective_spec, cwd=cwd, workdir=workdir)
+        elif harness == "ollama":
+            model = getattr(effective_spec.executor, "model", None) if effective_spec.executor else None
+            env = {
+                "HARNESS_OLLAMA_MODEL": model or "gemma4:12b",
+                "HARNESS_OLLAMA_BASE_URL": "http://localhost:11434/v1",
+            }
+        elif harness == "nemotron":
+            model = getattr(effective_spec.executor, "model", None) if effective_spec.executor else None
+            _nv_api_key = os.environ.get("NVIDIA_API_KEY", "")
+            env: dict[str, str] = {
+                "HARNESS_NEMOTRON_MODEL": model or "nvidia/nemotron-3-super-120b-a12b",
+                "HARNESS_NEMOTRON_BASE_URL": "https://integrate.api.nvidia.com/v1",
+                "OPENAI_BASE_URL": "https://integrate.api.nvidia.com/v1",
+            }
+            if _nv_api_key:
+                env["NVIDIA_API_KEY"] = _nv_api_key
+                env["OPENAI_API_KEY"] = _nv_api_key
         elif harness in ACP_CLI_HARNESSES:
             # Builtin ACP CLI harnesses (one catalog row each) share a single
             # builder; the row supplies the command, label, and install info.

@@ -118,7 +118,13 @@ class _StateAwareGZipResponder(GZipResponder):
         compresslevel: int,
         state: Mapping[str, object],
     ) -> None:
-        super().__init__(app, minimum_size, compresslevel=compresslevel)
+        import inspect
+
+        sig = inspect.signature(super().__init__)
+        kwargs: dict[str, object] = {"compresslevel": compresslevel}
+        if "thread_minimum_size" in sig.parameters:
+            kwargs["thread_minimum_size"] = minimum_size
+        super().__init__(app, minimum_size, **kwargs)
         self._state = state
 
     async def send_with_compression(self, message: Message) -> None:

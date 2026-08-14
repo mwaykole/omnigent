@@ -1442,9 +1442,10 @@ function HarnessConfigModal({
   const hasApproval = nativeAgentHasCapability(agent, "approvalMode");
   const hasCursor = nativeAgentHasCapability(agent, "cursorMode");
   const hasAgySkip = nativeAgentHasCapability(agent, "skipPermissions");
+  const isCodexLike = entryHarness === "codex-native" || entryHarness === "ollama" || entryHarness === "nemotron";
   const isCodex = entryHarness === "codex-native";
-  const modelOptions = isCodex ? codexModelOptions : claudeModelOptions;
-  const modelsLoading = isCodex ? codexModelsLoading : claudeModelsLoading;
+  const modelOptions = isCodexLike ? codexModelOptions : claudeModelOptions;
+  const modelsLoading = isCodexLike ? codexModelsLoading : claudeModelsLoading;
   const brainDefault =
     agent.harness != null && agent.harness in brainHarnessLabels ? agent.harness : null;
 
@@ -1543,13 +1544,13 @@ function HarnessConfigModal({
           mode: draftPermission,
         });
     } else if (hasApproval) {
-      if (isCodex) setPickedModel(draftModel);
+      if (isCodexLike) setPickedModel(draftModel);
       setApprovalMode(draftApproval);
       setBypassSandbox(draftBypass);
       if (entryHarness)
         writeHarnessOption(entryHarness, {
           mode: draftApproval,
-          ...(isCodex ? { model: draftModel } : {}),
+          ...(isCodexLike ? { model: draftModel } : {}),
         });
     } else if (hasCursor) {
       setCursorExecMode(draftCursor);
@@ -2090,6 +2091,10 @@ export function NewChatLandingScreen() {
     "codex-native",
     !sandboxSelected,
   );
+  const { data: hostOllamaModelOptions, isLoading: hostOllamaModelsLoading } =
+    useHostModelOptions(selectedHostId, "ollama", !sandboxSelected);
+  const { data: hostNemotronModelOptions, isLoading: hostNemotronModelsLoading } =
+    useHostModelOptions(selectedHostId, "nemotron", !sandboxSelected);
   const claudeModelOptions = useMemo(
     () =>
       sandboxSelected
@@ -2106,6 +2111,14 @@ export function NewChatLandingScreen() {
   const codexModelOptions = useMemo(
     () => (sandboxSelected ? [] : (hostCodexModelOptions ?? [])),
     [hostCodexModelOptions, sandboxSelected],
+  );
+  const ollamaModelOptions = useMemo(
+    () => (sandboxSelected ? [] : (hostOllamaModelOptions ?? [])),
+    [hostOllamaModelOptions, sandboxSelected],
+  );
+  const nemotronModelOptions = useMemo(
+    () => (sandboxSelected ? [] : (hostNemotronModelOptions ?? [])),
+    [hostNemotronModelOptions, sandboxSelected],
   );
   // Desktop-shell host status for THIS machine (null outside Electron), so the
   // picker can tag the current machine and offer to auto-connect it.
@@ -2735,7 +2748,9 @@ export function NewChatLandingScreen() {
       ? [{ label: "Model", value: SMART_ROUTING_LABEL }]
       : [];
     if (supportsApprovalMode) {
-      const isCodex = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness === "codex-native";
+      const summaryHarness = nativeCodingAgentForAvailableAgent(selectedAgent)?.harness;
+      const isCodex = summaryHarness === "codex-native";
+      const isCodexLike = isCodex || summaryHarness === "ollama" || summaryHarness === "nemotron";
       // Bypass is the most-permissive Approval choice, not a separate knob — so
       // mirror the modal's single Approval control: when armed, the Approval row
       // reads "Bypass approvals & sandbox" rather than the underlying preset
@@ -2745,15 +2760,17 @@ export function NewChatLandingScreen() {
           ? CODEX_NATIVE_BYPASS_APPROVAL_OPTION.label
           : (CODEX_NATIVE_APPROVAL_MODES.find((m) => m.value === approvalMode)?.label ??
             approvalMode);
+      const activeModelOptions =
+        summaryHarness === "nemotron" ? nemotronModelOptions : summaryHarness === "ollama" ? ollamaModelOptions : codexModelOptions;
       const modelRows =
-        routingOn || !isCodex
+        routingOn || !isCodexLike
           ? routingRow
           : [
               {
                 label: "Model",
                 value:
-                  codexModelOptions.find((m) => m.id === pickedModel)?.id ??
-                  defaultModelLabel(codexModelOptions, displayModelId),
+                  activeModelOptions.find((m) => m.id === pickedModel)?.id ??
+                  defaultModelLabel(activeModelOptions, displayModelId),
               },
             ];
       return [...modelRows, { label: "Approval", value: approvalValue }];
@@ -2788,6 +2805,8 @@ export function NewChatLandingScreen() {
     pickedModel,
     claudeModelOptions,
     codexModelOptions,
+    ollamaModelOptions,
+    nemotronModelOptions,
     pickedEffort,
     permissionMode,
     approvalMode,
@@ -2864,11 +2883,13 @@ export function NewChatLandingScreen() {
       // A remembered routing "on" outranks a remembered concrete model, and
       // also drops any model/effort left in the shared state (e.g. seeded for
       // Claude Code before the harness switch).
+      const seedModelOptions =
+        selectedNativeHarness === "nemotron" ? nemotronModelOptions : selectedNativeHarness === "ollama" ? ollamaModelOptions : codexModelOptions;
       setPickedModel(
         !storedRoutingOn &&
-          selectedNativeHarness === "codex-native" &&
+          (selectedNativeHarness === "codex-native" || selectedNativeHarness === "ollama" || selectedNativeHarness === "nemotron") &&
           stored.model != null &&
-          codexModelOptions.some((m) => m.id === stored.model)
+          seedModelOptions.some((m) => m.id === stored.model)
           ? stored.model
           : "",
       );
@@ -2881,7 +2902,7 @@ export function NewChatLandingScreen() {
     // Reseed on harness changes and when the selected host's catalog resolves;
     // capability flags are derived from the same harness and stay omitted.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedNativeHarness, claudeModelOptions, codexModelOptions]);
+  }, [selectedNativeHarness, claudeModelOptions, codexModelOptions, ollamaModelOptions, nemotronModelOptions]);
   // Smart Routing is remembered per harness alongside the mode/model
   // knobs, in its own effect because eligibility depends on the server flag
   // (which resolves after mount — this must reseed when it lands). A stored
@@ -3754,7 +3775,10 @@ export function NewChatLandingScreen() {
             model_override:
               !smartRoutingHarnessSelected &&
               !routingOwnsModel &&
-              (agentSupportsPermissionMode || nativeAgent?.harness === "codex-native") &&
+              (agentSupportsPermissionMode ||
+                nativeAgent?.harness === "codex-native" ||
+                nativeAgent?.harness === "ollama" ||
+                nativeAgent?.harness === "nemotron") &&
               pickedModel
                 ? pickedModel
                 : undefined,
@@ -4320,9 +4344,21 @@ export function NewChatLandingScreen() {
                     claudeModelsLoading={
                       !sandboxSelected && selectedHostId !== null && hostClaudeModelsLoading
                     }
-                    codexModelOptions={codexModelOptions}
+                    codexModelOptions={
+                      selectedNativeHarness === "nemotron"
+                        ? nemotronModelOptions
+                        : selectedNativeHarness === "ollama"
+                          ? ollamaModelOptions
+                          : codexModelOptions
+                    }
                     codexModelsLoading={
-                      !sandboxSelected && selectedHostId !== null && hostCodexModelsLoading
+                      !sandboxSelected &&
+                      selectedHostId !== null &&
+                      (selectedNativeHarness === "nemotron"
+                        ? hostNemotronModelsLoading
+                        : selectedNativeHarness === "ollama"
+                          ? hostOllamaModelsLoading
+                          : hostCodexModelsLoading)
                     }
                     pickedEffort={pickedEffort}
                     pickedHarness={pickedHarness}

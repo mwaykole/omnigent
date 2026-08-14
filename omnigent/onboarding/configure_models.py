@@ -160,6 +160,7 @@ _CATALOG_PROVIDER_FAMILY: dict[str, str] = {
     "mistral": OPENAI_FAMILY,
     "together_ai": OPENAI_FAMILY,
     "fireworks_ai": OPENAI_FAMILY,
+    "ollama": OPENAI_FAMILY,
 }
 
 
@@ -194,6 +195,7 @@ _KEY_PROVIDER_ENDPOINT: dict[str, _VendorEndpoint] = {
     "mistral": _VendorEndpoint("https://api.mistral.ai/v1", CHAT_WIRE_API),
     "together_ai": _VendorEndpoint("https://api.together.xyz/v1", CHAT_WIRE_API),
     "fireworks_ai": _VendorEndpoint("https://api.fireworks.ai/inference/v1", CHAT_WIRE_API),
+    "ollama": _VendorEndpoint("http://localhost:11434/v1", CHAT_WIRE_API),
 }
 
 
@@ -389,7 +391,7 @@ class AddOption:
 # surface, a distinct family), so it must be excluded here too — otherwise it
 # leaks into the openai-family "Other provider" catch-all, whose tail is
 # documented as "all openai-family" (see :func:`_add_option_families`).
-_PRESET_KEY_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "openrouter", "gemini")
+_PRESET_KEY_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "openrouter", "gemini", "ollama")
 
 
 def add_menu_options() -> list[AddOption]:
@@ -456,10 +458,17 @@ def add_menu_options() -> list[AddOption]:
             SUBSCRIPTION_KIND,
             cli="claude",
         ),
+        # Local servers (keyless, auto-detected).
+        _opt(
+            "Ollama — local",
+            "Use a local Ollama server (localhost:11434). No API key needed.",
+            LOCAL_KIND,
+            provider="ollama",
+        ),
         # Cross-vendor extras, alphabetical (Gateway before OpenRouter).
         _opt(
             "Gateway — custom base URL + key",
-            "An OpenAI/Anthropic-compatible proxy: LiteLLM, Ollama, vLLM, …",
+            "An OpenAI/Anthropic-compatible proxy: LiteLLM, vLLM, …",
             GATEWAY_KIND,
         ),
         _opt(
@@ -517,6 +526,8 @@ def _add_option_families(opt: AddOption) -> frozenset[str]:
     :returns: The surfaces this option can configure — a subset of
         ``{"anthropic", "openai", "gemini", "pi"}``.
     """
+    if opt.kind == LOCAL_KIND:
+        return frozenset({OPENAI_FAMILY, PI_SURFACE})
     if opt.kind == GATEWAY_KIND or opt.kind == DATABRICKS_KIND:
         return frozenset({ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE})
     if opt.kind == BEDROCK_KIND:
@@ -922,6 +933,35 @@ def build_gateway_provider_entry(
             block["wire_api"] = wire_api
         if models.get(family):
             block["models"] = {"default": models[family]}
+        body[family] = block
+    return body
+
+
+def build_local_provider_entry(
+    base_url: str,
+    *,
+    families: list[str],
+    wire_api: str | None = None,
+    default_model: str | None = None,
+) -> dict[str, object]:
+    """Build a ``kind: local`` provider entry body for a keyless local server.
+
+    :param base_url: The local server base URL, e.g.
+        ``"http://localhost:11434/v1"``.
+    :param families: The families the server serves.
+    :param wire_api: Wire protocol — ``"chat"`` for most local servers.
+    :param default_model: Default model id, e.g. ``"gemma3"``.
+    :returns: A provider entry body.
+    """
+    if not families:
+        raise ValueError("a local provider must serve at least one family")
+    body: dict[str, object] = {"kind": LOCAL_KIND}
+    for family in families:
+        block: dict[str, object] = {"base_url": base_url}
+        if family == OPENAI_FAMILY and wire_api is not None:
+            block["wire_api"] = wire_api
+        if default_model:
+            block["models"] = {"default": default_model}
         body[family] = block
     return body
 

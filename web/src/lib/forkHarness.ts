@@ -38,6 +38,8 @@ export function harnessFamily(
     case "openai-agents":
     case "openai-agents-sdk":
     case "agents_sdk":
+    case "ollama":
+    case "nemotron":
       return "openai";
     // Antigravity is Gemini-family: the native CLI (`antigravity-native`)
     // and the in-process SDK (`antigravity`, plus reversed spellings) all

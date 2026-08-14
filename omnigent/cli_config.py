@@ -586,6 +586,7 @@ def _configure_harness_add(family: str | None = None) -> str | None:
         CHAT_WIRE_API,
         CLI_CONFIG_KIND,
         DATABRICKS_KIND,
+        LOCAL_KIND,
         OPENAI_FAMILY,
         PI_SURFACE,
         RESPONSES_WIRE_API,
@@ -885,6 +886,29 @@ def _configure_harness_add(family: str | None = None) -> str | None:
             families=families,
             wire_api=wire_api,
             models=models,
+        )
+
+    elif kind == LOCAL_KIND:
+        from omnigent.onboarding.configure_models import build_local_provider_entry
+
+        name = chosen.provider or prompt_text("Name for this local provider", default="ollama")
+        endpoint = key_provider_endpoint(name)
+        default_url = endpoint.base_url if endpoint else "http://localhost:11434/v1"
+        base_url = prompt_text("Base URL", default=default_url)
+        from omnigent.onboarding.providers import default_chat_model
+
+        default_model = (
+            prompt_text(
+                "Default model (e.g. gemma3, llama3, mistral)",
+                default=default_chat_model(name),
+            ).strip()
+            or None
+        )
+        entry = build_local_provider_entry(
+            base_url=base_url,
+            families=[OPENAI_FAMILY],
+            wire_api=CHAT_WIRE_API,
+            default_model=default_model,
         )
 
     elif kind == BEDROCK_KIND:

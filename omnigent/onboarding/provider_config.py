@@ -562,7 +562,9 @@ def _expand_family(provider_name: str, family_name: str, family: FamilyConfig) -
     return replace(family, base_url=base_url)
 
 
-def _parse_family(provider_name: str, family_name: str, raw: dict[str, object]) -> FamilyConfig:
+def _parse_family(
+    provider_name: str, family_name: str, raw: dict[str, object], *, kind: str = ""
+) -> FamilyConfig:
     """Parse one family entry under a provider into a :class:`FamilyConfig`.
 
     Performs **structural** validation only (required ``base_url``, exactly
@@ -606,7 +608,7 @@ def _parse_family(provider_name: str, family_name: str, raw: dict[str, object]) 
             f"'auth_command', not multiple ({', '.join(set_names)}).",
             code=ErrorCode.INVALID_INPUT,
         )
-    if not set_names:
+    if not set_names and kind != LOCAL_KIND:
         raise OmnigentError(
             f"{prefix} requires one of 'api_key', 'api_key_ref', or 'auth_command'.",
             code=ErrorCode.INVALID_INPUT,
@@ -879,7 +881,7 @@ def _parse_provider(name: str, raw: dict[str, object]) -> ProviderEntry:
     for family_name in _VALID_FAMILIES:
         family_raw = raw.get(family_name)
         if isinstance(family_raw, dict):
-            families[family_name] = _parse_family(name, family_name, family_raw)
+            families[family_name] = _parse_family(name, family_name, family_raw, kind=kind)
     if not families:
         raise OmnigentError(
             f"provider {name!r} (kind {kind!r}) configures no "

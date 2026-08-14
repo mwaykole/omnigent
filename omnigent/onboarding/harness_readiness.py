@@ -149,6 +149,14 @@ _HERMES_NATIVE_HARNESSES: frozenset[str] = frozenset({"hermes-native", "native-h
 # ``_HARNESS_FAMILY`` entry, so they must be gated explicitly or they fail open.
 _QWEN_HARNESSES: frozenset[str] = frozenset({QWEN_KEY, "qwen-code", "qwen-native", "native-qwen"})
 
+# Ollama harnesses. Ollama is aliased to codex-native for the executor, but
+# readiness should check for the ``ollama`` binary (a local inference server),
+# not the codex CLI. Without this set the alias would inherit codex's
+# binary-missing state on machines that have Ollama but not Codex installed.
+_OLLAMA_HARNESSES: frozenset[str] = frozenset({"ollama", "ollama-native"})
+
+_NEMOTRON_HARNESSES: frozenset[str] = frozenset({"nemotron", "nemotron-native"})
+
 
 def _canonical_harness(harness: str) -> str:
     """Normalize a harness id to its canonical spelling.
@@ -203,6 +211,10 @@ def _harness_availability_core(harness: str) -> HarnessAvailability:
     :returns: A :data:`HarnessAvailability` value.``True`` when launchable;
         ``False`` or a reason string otherwise.
     """
+    if harness in _OLLAMA_HARNESSES:
+        return True if resolve_cli_binary("ollama") is not None else HARNESS_BINARY_MISSING
+    if harness in _NEMOTRON_HARNESSES:
+        return True if os.environ.get("NVIDIA_API_KEY") else HARNESS_BINARY_MISSING
     canonical = _canonical_harness(harness)
     if canonical == "acp":
         # The generic ACP harness has no fixed binary — "configured" means at
@@ -504,6 +516,8 @@ def configured_harness_map() -> dict[str, HarnessAvailability]:
     spellings.update(_KIMI_NATIVE_HARNESSES)
     spellings.update(_HERMES_NATIVE_HARNESSES)
     spellings.update(_QWEN_HARNESSES)
+    spellings.update(_OLLAMA_HARNESSES)
+    spellings.update(_NEMOTRON_HARNESSES)
     spellings.add(CURSOR_KEY)
     spellings.add(KIMI_SURFACE)
     spellings.add(GOOSE_KEY)  # headless Goose (``goose acp``) gates on the goose binary
@@ -512,6 +526,22 @@ def configured_harness_map() -> dict[str, HarnessAvailability]:
     availability_cache: dict[tuple[str, ...], HarnessAvailability] = {}
     result: dict[str, HarnessAvailability] = {}
     for spelling in spellings:
+        if spelling in _OLLAMA_HARNESSES:
+            cache_key = ("ollama",)
+            if cache_key not in availability_cache:
+                availability_cache[cache_key] = (
+                    True if resolve_cli_binary("ollama") is not None else HARNESS_BINARY_MISSING
+                )
+            result[spelling] = availability_cache[cache_key]
+            continue
+        if spelling in _NEMOTRON_HARNESSES:
+            cache_key = ("nemotron",)
+            if cache_key not in availability_cache:
+                availability_cache[cache_key] = (
+                    True if os.environ.get("NVIDIA_API_KEY") else HARNESS_BINARY_MISSING
+                )
+            result[spelling] = availability_cache[cache_key]
+            continue
         canonical = _canonical_harness(spelling)
         cache_key = ("codex",) if _is_codex_family_harness(canonical) else ("harness", canonical)
         if cache_key not in availability_cache:

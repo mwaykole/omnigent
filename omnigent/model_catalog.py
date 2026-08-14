@@ -66,6 +66,7 @@ from omnigent.onboarding.provider_config import (
     CLI_CONFIG_KIND,
     DATABRICKS_KIND,
     KEY_KIND,
+    LOCAL_KIND,
     OPENAI_FAMILY,
     SUBSCRIPTION_KIND,
     ProviderEntry,
@@ -826,6 +827,8 @@ def list_models_for_worker(
         listing = _listing_for_provider(provider, transport=transport)
     if harness is None:
         return listing
+    if provider.kind == LOCAL_KIND:
+        return listing
     filtered = tuple(m for m in listing.models if model_family_mismatch(harness, m.id) is None)
     return replace(listing, models=filtered)
 
@@ -1311,6 +1314,8 @@ def _resolve_bearer_token(provider: ResolvedModelProvider) -> str:
         if not token:
             raise ValueError("provider auth_command printed no token")
         return token
+    if provider.kind == LOCAL_KIND:
+        return "no-key-needed"
     raise ValueError("provider has no credential to list models with")
 
 

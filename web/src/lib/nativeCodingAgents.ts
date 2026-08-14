@@ -15,7 +15,9 @@ export type NativeCodingAgentIconKind =
   | "qwen"
   | "antigravity"
   | "kimi"
-  | "hermes";
+  | "hermes"
+  | "ollama"
+  | "nemotron";
 export type NativeCodingAgentCapability =
   "permissionMode" | "approvalMode" | "cursorMode" | "skipPermissions";
 
@@ -178,6 +180,25 @@ export const NATIVE_CODING_AGENTS = [
     displayName: "Hermes",
     iconKind: "hermes",
     sortRank: 80,
+  },
+  {
+    key: "ollama",
+    agentName: "ollama-native-ui",
+    harness: "ollama",
+    wrapperLabel: "ollama-native-ui",
+    displayName: "Ollama",
+    iconKind: "ollama",
+    sortRank: 55,
+    capabilities: ["approvalMode"],
+  },
+  {
+    key: "nemotron",
+    agentName: "nemotron-native-ui",
+    harness: "nemotron",
+    wrapperLabel: "nemotron-native-ui",
+    displayName: "Nemotron",
+    iconKind: "nemotron",
+    sortRank: 56,
   },
 ] as const satisfies readonly NativeCodingAgentSpec[];
 
@@ -386,10 +407,14 @@ export function nativeWrapperLabelsForAgent(
 ): Record<string, string> | undefined {
   const nativeAgent = nativeCodingAgentForAvailableAgent(agent);
   if (nativeAgent === undefined) return undefined;
-  return {
-    [UI_MODE_LABEL_KEY]: UI_MODE_TERMINAL_VALUE,
+  const labels: Record<string, string> = {
     [WRAPPER_LABEL_KEY]: nativeAgent.wrapperLabel,
   };
+  // Ollama is an in-process executor with no CLI terminal — render as chat.
+  if (nativeAgent.key !== "ollama" && nativeAgent.key !== "nemotron") {
+    labels[UI_MODE_LABEL_KEY] = UI_MODE_TERMINAL_VALUE;
+  }
+  return labels;
 }
 
 export function nativeDisplayNameForAgent(agent: Pick<AvailableAgent, "name" | "harness">): string {

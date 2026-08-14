@@ -80,3 +80,9 @@ KIMI_NATIVE_WRAPPER_VALUE = "kimi-native-ui"
 # Value the ``omnigent hermes`` wrapper writes into
 # ``conversations.labels[WRAPPER_LABEL_KEY]``.
 HERMES_NATIVE_WRAPPER_VALUE = "hermes-native-ui"
+# Value the Ollama native wrapper writes into
+# ``conversations.labels[WRAPPER_LABEL_KEY]``.
+OLLAMA_NATIVE_WRAPPER_VALUE = "ollama-native-ui"
+# Value the Nemotron (OpenRouter) wrapper writes into
+# ``conversations.labels[WRAPPER_LABEL_KEY]``.
+NEMOTRON_NATIVE_WRAPPER_VALUE = "nemotron-native-ui"

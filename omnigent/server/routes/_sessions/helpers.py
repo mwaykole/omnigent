@@ -8147,6 +8147,10 @@ def _repl_terminal_ui_labels(
         harness = _spec_harness(spec)
     if is_native_harness(harness):
         return {}
+    # Ollama is an in-process executor with no useful CLI terminal to show,
+    # so skip the terminal-first label — render as a regular chat session.
+    if harness in ("ollama", "nemotron"):
+        return {}
     return {_CLAUDE_NATIVE_UI_LABEL_KEY: _CLAUDE_NATIVE_UI_LABEL_VALUE}
 
 

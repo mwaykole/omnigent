@@ -704,6 +704,8 @@ _MODEL_OPTIONS_ENDPOINT_BY_WRAPPER: dict[str, str] = {
     _CURSOR_NATIVE_WRAPPER_LABEL_VALUE: "cursor-model-options",
     _KIRO_NATIVE_WRAPPER_LABEL_VALUE: "kiro-model-options",
     _OPENCODE_NATIVE_WRAPPER_LABEL_VALUE: "codex-model-options",
+    "nemotron-native-ui": "nemotron-model-options",
+    "ollama-native-ui": "ollama-model-options",
     # pi-native is deliberately NOT here: its catalog is PUSHED by the resident
     # extension (``external_model_options`` → ``_pushed_model_options_cache``),
     # not fetched from a runner route, so the picker works in every auth path

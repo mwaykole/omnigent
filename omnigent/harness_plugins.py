@@ -12,6 +12,7 @@ import importlib.metadata
 import logging
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TypeVar, cast
 
 from omnigent._wrapper_labels import (
@@ -23,6 +24,8 @@ from omnigent._wrapper_labels import (
     HERMES_NATIVE_WRAPPER_VALUE,
     KIMI_NATIVE_WRAPPER_VALUE,
     KIRO_NATIVE_WRAPPER_VALUE,
+    NEMOTRON_NATIVE_WRAPPER_VALUE,
+    OLLAMA_NATIVE_WRAPPER_VALUE,
     OPENCODE_NATIVE_WRAPPER_VALUE,
     PI_NATIVE_WRAPPER_VALUE,
     QWEN_NATIVE_WRAPPER_VALUE,
@@ -64,10 +67,11 @@ class NativeCodingAgent:
     @property
     def presentation_labels(self) -> dict[str, str]:
         """Return labels that make sessions render terminal-first."""
-        return {
-            UI_MODE_LABEL_KEY: UI_MODE_TERMINAL_VALUE,
-            WRAPPER_LABEL_KEY: self.wrapper_label,
-        }
+        labels: dict[str, str] = {WRAPPER_LABEL_KEY: self.wrapper_label}
+        # Ollama is in-process with no CLI terminal — render as chat.
+        if self.key not in ("ollama", "nemotron"):
+            labels[UI_MODE_LABEL_KEY] = UI_MODE_TERMINAL_VALUE
+        return labels
 
 
 @dataclass(frozen=True)
@@ -242,6 +246,24 @@ HERMES_NATIVE_CODING_AGENT = NativeCodingAgent(
     terminal_name="hermes",
 )
 
+OLLAMA_NATIVE_CODING_AGENT = NativeCodingAgent(
+    key="ollama",
+    display_name="Ollama",
+    agent_name="ollama-native-ui",
+    harness="ollama",
+    wrapper_label=OLLAMA_NATIVE_WRAPPER_VALUE,
+    terminal_name="ollama",
+)
+
+NEMOTRON_NATIVE_CODING_AGENT = NativeCodingAgent(
+    key="nemotron",
+    display_name="Nemotron",
+    agent_name="nemotron-native-ui",
+    harness="nemotron",
+    wrapper_label=NEMOTRON_NATIVE_WRAPPER_VALUE,
+    terminal_name="nemotron",
+)
+
 
 # Native harnesses whose spawn-env builder takes a ``bridge_id=`` resolved from
 # a session label. Their label key follows the uniform
@@ -294,6 +316,104 @@ _BUILTIN_NATIVE_PROVIDERS: tuple[NativeHarnessProvider, ...] = tuple(
         KIMI_NATIVE_CODING_AGENT,
         HERMES_NATIVE_CODING_AGENT,
     )
+)
+# Ollama reuses the codex-native executor but needs its own agent identity
+# so it appears as a separate entry in the picker.
+def _materialize_ollama_agent_spec(
+    tmpdir: Path,
+    *,
+    model: str | None = None,
+) -> Path:
+    """Write the agent spec for the Ollama native UI harness."""
+    import yaml
+
+    yaml_path = tmpdir / "ollama-native-ui.yaml"
+    executor: dict[str, str] = {"harness": "ollama"}
+    if model is not None:
+        executor["model"] = model
+    raw = {
+        "name": "ollama-native-ui",
+        "prompt": (
+            "Ollama is running in the session terminal. Web UI messages are "
+            "forwarded into the native Codex app-server thread configured "
+            "for a local Ollama backend."
+        ),
+        "executor": executor,
+        "spawn": True,
+        "os_env": {
+            "TERM": "xterm-256color",
+            "NO_COLOR": "1",
+        },
+    }
+    yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return yaml_path
+
+
+def _build_ollama_spawn_env(
+    conversation_id: str,
+    *,
+    bridge_id: str | None = None,
+) -> dict[str, str]:
+    """Build spawn env for the ``ollama`` in-process harness."""
+    return {}
+
+
+_OLLAMA_NATIVE_PROVIDER = NativeHarnessProvider(
+    key="ollama",
+    run_native=None,
+    auto_create_terminal=None,
+    spawn_env_builder="omnigent.harness_plugins:_build_ollama_spawn_env",
+    bridge_id_label_key=None,
+    materialize_agent_spec="omnigent.harness_plugins:_materialize_ollama_agent_spec",
+)
+
+
+def _materialize_nemotron_agent_spec(
+    tmpdir: Path,
+    *,
+    model: str | None = None,
+) -> Path:
+    """Write the agent spec for the Nemotron (OpenRouter) native UI harness."""
+    import yaml
+
+    yaml_path = tmpdir / "nemotron-native-ui.yaml"
+    executor: dict[str, str] = {"harness": "nemotron"}
+    if model is not None:
+        executor["model"] = model
+    raw = {
+        "name": "nemotron-native-ui",
+        "prompt": (
+            "Nemotron is running via OpenRouter API. Web UI messages are "
+            "forwarded into the in-process executor configured for "
+            "NVIDIA Nemotron models."
+        ),
+        "executor": executor,
+        "spawn": True,
+        "os_env": {
+            "TERM": "xterm-256color",
+            "NO_COLOR": "1",
+        },
+    }
+    yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return yaml_path
+
+
+def _build_nemotron_spawn_env(
+    conversation_id: str,
+    *,
+    bridge_id: str | None = None,
+) -> dict[str, str]:
+    """Build spawn env for the ``nemotron`` in-process harness."""
+    return {}
+
+
+_NEMOTRON_NATIVE_PROVIDER = NativeHarnessProvider(
+    key="nemotron",
+    run_native=None,
+    auto_create_terminal=None,
+    spawn_env_builder="omnigent.harness_plugins:_build_nemotron_spawn_env",
+    bridge_id_label_key=None,
+    materialize_agent_spec="omnigent.harness_plugins:_materialize_nemotron_agent_spec",
 )
 
 
@@ -488,6 +608,34 @@ _BUILTIN_CAPABILITIES: dict[str, HarnessCapabilities] = {
         shell_tool_name="terminal",
         shell_tool_prompt=_SHELL_PROMPT,
     ),
+    "ollama": _C(
+        _IM.NATIVE_TUI,
+        _EL.JSONRPC,
+        _RS.WARM_REATTACH,
+        _EF.OPENAI,
+        _MF.MULTI,
+        _AU.OMNIGENT_CREDENTIAL,
+        subagents=True,
+        interrupt=True,
+        streaming=True,
+        fork_history=_FH.REBUILD,
+        shell_tool_name="shell",
+        shell_tool_prompt=_SHELL_PROMPT,
+    ),
+    "nemotron": _C(
+        _IM.NATIVE_TUI,
+        _EL.JSONRPC,
+        _RS.WARM_REATTACH,
+        _EF.OPENAI,
+        _MF.MULTI,
+        _AU.OWN_AUTH,
+        subagents=True,
+        interrupt=True,
+        streaming=True,
+        fork_history=_FH.REBUILD,
+        shell_tool_name="shell",
+        shell_tool_prompt=_SHELL_PROMPT,
+    ),
     # SDK / subprocess harnesses (run the vendor model directly). The first four
     # are bench-verified interrupt=streaming=True.
     "claude-sdk": _C(
@@ -670,6 +818,8 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
             "kimi",
             "kimi-native",
             "kiro-native",
+            "nemotron",
+            "ollama",
             "open-responses",
             "openai-agents",
             "opencode-native",
@@ -692,6 +842,8 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         "claude-sdk": "omnigent.inner.claude_sdk_harness",
         "codex": "omnigent.inner.codex_harness",
         "codex-native": "omnigent.inner.codex_native_harness",
+        "nemotron": "omnigent.inner.nemotron_harness",
+        "ollama": "omnigent.inner.ollama_harness",
         "copilot": "omnigent.inner.copilot_harness",
         "cursor": "omnigent.inner.cursor_harness",
         "cursor-native": "omnigent.inner.cursor_native_harness",
@@ -724,6 +876,8 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         "native-opencode": "opencode-native",
         "native-pi": "pi-native",
         "native-qwen": "qwen-native",
+        "nemotron-native": "nemotron",
+        "ollama-native": "ollama",
         "opencode": "opencode-native",
         "openai-agents-sdk": "openai-agents",
         "qwen-code": "qwen",
@@ -766,8 +920,10 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         QWEN_NATIVE_CODING_AGENT,
         KIMI_NATIVE_CODING_AGENT,
         HERMES_NATIVE_CODING_AGENT,
+        OLLAMA_NATIVE_CODING_AGENT,
+        NEMOTRON_NATIVE_CODING_AGENT,
     ),
-    native_providers=_BUILTIN_NATIVE_PROVIDERS,
+    native_providers=(*_BUILTIN_NATIVE_PROVIDERS, _OLLAMA_NATIVE_PROVIDER, _NEMOTRON_NATIVE_PROVIDER),
     # Catalog rows gate readiness on their vendor binary; the install spec also
     # feeds setup steps and (for npm rows) the one-click install path.
     install_specs={name: row.install for name, row in ACP_CLI_HARNESSES.items()},
@@ -786,6 +942,8 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         "goose": "HARNESS_GOOSE_MODEL",
         "hermes": "HARNESS_HERMES_MODEL",
         "kimi": "HARNESS_KIMI_MODEL",
+        "nemotron": "HARNESS_NEMOTRON_MODEL",
+        "ollama": "HARNESS_OLLAMA_MODEL",
         "openai-agents": "HARNESS_OPENAI_AGENTS_MODEL",
         "pi": "HARNESS_PI_MODEL",
         "qwen": "HARNESS_QWEN_MODEL",
@@ -816,6 +974,8 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         # stays a valid harness for YAML specs (and the credential-free
         # integration mock LLM), but is no longer offered as a UI pick.
         "pi": "Pi",
+        "nemotron": "Nemotron",
+        "ollama": "Ollama",
         **{name: row.label for name, row in ACP_CLI_HARNESSES.items()},
     },
     capabilities=_BUILTIN_CAPABILITIES,

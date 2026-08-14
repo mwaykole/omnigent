@@ -202,6 +202,7 @@ import { ResumeWithDirectoryDialog } from "@/shell/ResumeWithDirectoryDialog";
 import { ReconnectSessionDialog } from "@/shell/ReconnectSessionDialog";
 import { useTerminalFirst } from "@/shell/TerminalFirstContext";
 import { useForkDialog } from "@/shell/ForkDialogContext";
+import { SwitchAgentDialog } from "@/shell/SwitchAgentDialog";
 import { ToolActivityPanel } from "@/shell/ToolActivityPanel";
 import { supportsEffortControl } from "@/lib/sessionCapabilities";
 import { isCodexNativeSession } from "@/lib/codexPlanMode";
@@ -4390,6 +4391,8 @@ export function composerHarnessLabel(
   if (modelPickerKind === "codex") return "Codex";
   if (modelPickerKind === "cursor") return "Cursor";
   if (modelPickerKind === "kiro") return "Kiro";
+  if (modelPickerKind === "nemotron") return "Nemotron";
+  if (modelPickerKind === "ollama") return "Ollama";
   if (modelPickerKind === "opencode") return "OpenCode";
   const display = agentName ? agentDisplayLabel(agentName) : null;
   const harness = sessionHarness ? (harnessLabels[sessionHarness] ?? null) : null;
@@ -6078,7 +6081,7 @@ const EFFORT_LEVELS = ["low", "medium", "high"] as const;
 /** Anthropic-side efforts for claude-native sessions (matches ANTHROPIC_EFFORTS in reasoning_effort.py). */
 const CLAUDE_NATIVE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
-type NativeModelPickerKind = "claude" | "codex" | "cursor" | "kiro" | "opencode" | "pi";
+type NativeModelPickerKind = "claude" | "codex" | "cursor" | "kiro" | "nemotron" | "ollama" | "opencode" | "pi";
 
 type LabelSource = { labels?: Record<string, string | null> | null } | null | undefined;
 
@@ -6158,6 +6161,10 @@ export function modelPickerKindForConv(
       // ``/model`` picks back to ``model_override`` via the extension's
       // model_select handler, so the picker surfaces that as the live model.
       return "pi";
+    case "nemotron-native-ui":
+      return "nemotron";
+    case "ollama-native-ui":
+      return "ollama";
     default:
       return null;
   }
@@ -6293,6 +6300,7 @@ function SessionConfigModal({
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const subagentRoutingOverride = useChatStore((s) => s.subagentRoutingOverride);
   const conversationId = useChatStore((s) => s.conversationId);
+  const [switchDialogOpen, setSwitchDialogOpen] = useState(false);
   const { llmModel, usesServerModelOptions, modelOptions, pickerSelectedModel, modelLabel } =
     useResolvedComposerModel(modelPickerKind, codexModelOptions);
 
@@ -6444,6 +6452,7 @@ function SessionConfigModal({
   }, [usesServerModelOptions, modelOptions, draftModelId, modelLabel]);
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md" data-testid="composer-config-modal">
         <DialogHeader>
@@ -6540,6 +6549,20 @@ function SessionConfigModal({
         </div>
 
         <DialogFooter className="border-t-0 bg-transparent">
+          {conversationId && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="mr-auto text-muted-foreground"
+              onClick={() => {
+                onOpenChange(false);
+                setSwitchDialogOpen(true);
+              }}
+              data-testid="composer-config-switch-agent"
+            >
+              Switch Agent
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
@@ -6554,6 +6577,14 @@ function SessionConfigModal({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    {conversationId && (
+      <SwitchAgentDialog
+        sessionId={conversationId}
+        open={switchDialogOpen}
+        onOpenChange={setSwitchDialogOpen}
+      />
+    )}
+    </>
   );
 }
 
@@ -6759,6 +6790,8 @@ function useResolvedComposerModel(
     modelPickerKind === "codex" ||
     modelPickerKind === "cursor" ||
     modelPickerKind === "kiro" ||
+    modelPickerKind === "nemotron" ||
+    modelPickerKind === "ollama" ||
     modelPickerKind === "pi" ||
     modelPickerKind === "opencode";
   const modelOptions: readonly { id: string; label?: string; displayName?: string }[] =

@@ -2101,6 +2101,8 @@ def _codex_provider_launch(entry: ProviderEntry, model: str | None) -> NativeCod
         auth_command = family.auth_command
     elif family.api_key:
         auth_command = f"printf %s {shlex.quote(family.api_key)}"
+    elif entry.kind == LOCAL_KIND:
+        auth_command = "printf %s no-key-needed"
     else:
         # Serves openai but carries no usable credential.
         return None

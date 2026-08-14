@@ -552,6 +552,7 @@ _BASE_HARNESS_CREDENTIAL_ENV_VARS: frozenset[str] = frozenset(
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "GEMINI_API_KEY",
+        "NVIDIA_API_KEY",
         "GIT_TOKEN",
         "GIT_USERNAME",
     }
@@ -2314,6 +2315,73 @@ class HostProcess:
                 status="ok",
                 models=models,
             )
+
+        if harness == "ollama":
+            try:
+                import urllib.request
+
+                resp = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5)
+                data = __import__("json").loads(resp.read())
+                ollama_models: list[dict[str, object]] = []
+                for i, m in enumerate(data.get("models", [])):
+                    name = m.get("name", "")
+                    if name:
+                        ollama_models.append(
+                            {
+                                "id": name,
+                                "displayName": name,
+                                **({"isDefault": True} if i == 0 else {}),
+                            }
+                        )
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="ok",
+                    models=ollama_models,
+                )
+            except Exception:
+                _logger.exception("Failed to resolve Ollama model options")
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error="failed to resolve Ollama model options",
+                )
+
+        if harness == "nemotron":
+            try:
+                import urllib.request
+
+                api_key = os.environ.get("NVIDIA_API_KEY", "")
+                req = urllib.request.Request(
+                    "https://integrate.api.nvidia.com/v1/models",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                resp = urllib.request.urlopen(req, timeout=10)
+                data = __import__("json").loads(resp.read())
+                nemotron_models: list[dict[str, object]] = []
+                is_first = True
+                for m in data.get("data", []):
+                    mid = m.get("id", "")
+                    if "nemotron" in mid.lower():
+                        nemotron_models.append(
+                            {
+                                "id": mid,
+                                "displayName": mid,
+                                **({"isDefault": True} if is_first else {}),
+                            }
+                        )
+                        is_first = False
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="ok",
+                    models=nemotron_models,
+                )
+            except Exception:
+                _logger.exception("Failed to resolve Nemotron model options")
+                return HostModelOptionsResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error="failed to resolve Nemotron model options",
+                )
 
         if harness != "claude-native":
             return HostModelOptionsResultFrame(
