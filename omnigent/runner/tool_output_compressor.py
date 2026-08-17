@@ -27,7 +27,11 @@ _logger = logging.getLogger(__name__)
 
 # ── algorithm registry ──────────────────────────────────────
 
-ALL_ALGO_KEYS = frozenset({"json", "log", "listing", "delta", "general"})
+ALL_ALGO_KEYS = frozenset({
+    "json", "log", "listing", "delta", "general",
+    "stacktrace", "testoutput", "code", "tabular",
+    "pathfactor", "precision", "fuzzydedup",
+})
 
 # ── thresholds ──────────────────────────────────────────────
 
@@ -64,12 +68,17 @@ _LISTING_TOOLS = frozenset({
     "list_files", "list_directory",
     "LS", "Glob",
 })
+_READ_TOOLS = frozenset({
+    "read_file", "Read", "View",
+    "cat_file", "file_read",
+})
 
 # ANSI escape sequence pattern.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 _MULTI_BLANK_RE = re.compile(r"\n{3,}")
 _TRAILING_WS_RE = re.compile(r"[ \t]+$", re.MULTILINE)
 _COMMENT_LINE_RE = re.compile(r"^\s*(?:#|//)[^\n]*$", re.MULTILINE)
+_DOCSTRING_RE = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\')', re.MULTILINE)
 _LOG_VAR_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[.\d]*Z?"
     r"|[0-9a-f]{7,40}"
@@ -79,6 +88,32 @@ _LOG_VAR_RE = re.compile(
     r"|\b\d{4,}\b",
     re.IGNORECASE,
 )
+
+# Stack trace patterns.
+_PY_TRACEBACK_START = re.compile(r"^Traceback \(most recent call last\):", re.MULTILINE)
+_PY_FRAME_RE = re.compile(r'^\s+File ".*", line \d+', re.MULTILINE)
+_JAVA_FRAME_RE = re.compile(r"^\s+at [\w.$]+\([\w.]+:\d+\)", re.MULTILINE)
+_NODE_FRAME_RE = re.compile(r"^\s+at .+\(.+:\d+:\d+\)", re.MULTILINE)
+_GO_GOROUTINE_RE = re.compile(r"^goroutine \d+ \[", re.MULTILINE)
+
+# Test output patterns.
+_PYTEST_PASS_RE = re.compile(r"^(?:PASSED|PASS|\.+)\s*$", re.MULTILINE)
+_PYTEST_RESULT_RE = re.compile(
+    r"^=+ (?:\d+ passed|.*(?:passed|failed|error|warning)).*=+\s*$",
+    re.MULTILINE,
+)
+_TEST_OK_LINE_RE = re.compile(r"^(?:ok \d+|  ✓|  √|PASS:) ", re.MULTILINE)
+_TEST_FAIL_LINE_RE = re.compile(
+    r"^(?:FAIL|FAILED|ERROR|not ok \d+|  ✗|  ×|FAIL:) ", re.MULTILINE | re.IGNORECASE,
+)
+
+# Tabular output patterns.
+_TABLE_SEP_RE = re.compile(r"^[+\-|─┼┤├┐┌┘└═╔╗╚╝╠╣╦╩╬]+$")
+_TABLE_PIPE_RE = re.compile(r"^\|.*\|$")
+
+# Path prefix patterns.
+_LONG_PATH_RE = re.compile(r"(?:/[\w._-]+){4,}")
+_FLOAT_RE = re.compile(r"\b\d+\.\d{4,}\b")
 
 
 # ── per-session stats accumulator ──────────────────────────
@@ -309,12 +344,23 @@ def _dispatch(output: str, tool_name: str, algos: frozenset[str]) -> str:
     if tool_name in _LISTING_TOOLS and "listing" in algos:
         return _compress_listing(output)
 
-    # Content-based detection: directory listing from any tool.
     if "listing" in algos and _looks_like_ls(output):
         return _compress_listing(output)
 
+    # Stack trace dedup runs early — biggest wins on error-heavy output.
+    if "stacktrace" in algos and _has_stacktrace(output):
+        output = _compress_stacktraces(output)
+
+    # Test output compression for shell tools producing test results.
+    if tool_name in _SHELL_TOOLS and "testoutput" in algos and _has_test_output(output):
+        return _compress_test_output(output)
+
     if tool_name in _SHELL_TOOLS and "log" in algos:
-        return _compress_log(output)
+        output = _compress_log(output)
+
+    # Code comment/docstring stripping for file-read tools.
+    if tool_name in _READ_TOOLS and "code" in algos:
+        output = _compress_code(output)
 
     stripped = output.lstrip()
     if stripped[:1] in ("{", "[") and "json" in algos:
@@ -322,6 +368,22 @@ def _dispatch(output: str, tool_name: str, algos: frozenset[str]) -> str:
             return _compress_json(output)
         except (json.JSONDecodeError, ValueError, RecursionError):
             pass
+
+    # Tabular output compression.
+    if "tabular" in algos and _has_table(output):
+        output = _compress_tabular(output)
+
+    # Path prefix factoring.
+    if "pathfactor" in algos:
+        output = _factor_paths(output)
+
+    # Numeric precision reduction.
+    if "precision" in algos:
+        output = _reduce_precision(output)
+
+    # Fuzzy line dedup.
+    if "fuzzydedup" in algos:
+        output = _fuzzy_dedup(output)
 
     if "general" in algos:
         return _compress_general(output)
@@ -451,9 +513,260 @@ def _compress_listing(text: str) -> str:
 
 
 def _compress_code(text: str) -> str:
-    return _TRAILING_WS_RE.sub(
-        "", _MULTI_BLANK_RE.sub("\n\n", _COMMENT_LINE_RE.sub("", text))
+    text = _DOCSTRING_RE.sub('"""..."""', text)
+    text = _COMMENT_LINE_RE.sub("", text)
+    text = _MULTI_BLANK_RE.sub("\n\n", text)
+    text = _TRAILING_WS_RE.sub("", text)
+    return text
+
+
+# ── stack trace dedup ──────────────────────────────────────
+
+
+def _has_stacktrace(text: str) -> bool:
+    return bool(
+        _PY_TRACEBACK_START.search(text)
+        or (_JAVA_FRAME_RE.search(text) and text.count("\n\tat ") > 3)
+        or (_GO_GOROUTINE_RE.search(text) and text.count("\ngoroutine ") > 1)
+        or (_NODE_FRAME_RE.search(text) and text.count("\n    at ") > 5)
     )
+
+
+def _compress_stacktraces(text: str) -> str:
+    traces = _extract_traces(text)
+    if len(traces) < 2:
+        return text
+
+    seen: dict[str, int] = {}
+    for start, end, signature in traces:
+        seen[signature] = seen.get(signature, 0) + 1
+
+    result_parts: list[str] = []
+    last_end = 0
+    emitted: set[str] = set()
+
+    for start, end, signature in traces:
+        result_parts.append(text[last_end:start])
+        if signature not in emitted:
+            result_parts.append(text[start:end])
+            if seen[signature] > 1:
+                result_parts.append(
+                    f"\n  [identical trace repeated {seen[signature]}x total]"
+                )
+            emitted.add(signature)
+        last_end = end
+
+    result_parts.append(text[last_end:])
+    return "".join(result_parts)
+
+
+def _extract_traces(text: str) -> list[tuple[int, int, str]]:
+    """Extract (start, end, signature) for each stack trace block."""
+    traces: list[tuple[int, int, str]] = []
+
+    for m in _PY_TRACEBACK_START.finditer(text):
+        start = m.start()
+        end = start
+        lines = text[start:].split("\n")
+        trace_lines: list[str] = []
+        for i, line in enumerate(lines):
+            if i == 0:
+                trace_lines.append(line)
+                continue
+            if line.startswith("  ") or (
+                not line.startswith(" ") and i > 0 and lines[i - 1].startswith("  ")
+            ):
+                trace_lines.append(line)
+                end = start + sum(len(l) + 1 for l in lines[: i + 1])
+            elif i > 1:
+                break
+        sig = _trace_signature(trace_lines)
+        traces.append((start, end, sig))
+
+    return traces
+
+
+def _trace_signature(lines: list[str]) -> str:
+    """Normalize a trace to a comparable signature."""
+    normalized = []
+    for line in lines:
+        line = re.sub(r"line \d+", "line N", line)
+        line = re.sub(r"0x[0-9a-fA-F]+", "0xN", line)
+        normalized.append(line.strip())
+    return "\n".join(normalized)
+
+
+# ── test output compression ───────────────────────────────
+
+
+def _has_test_output(text: str) -> bool:
+    return bool(
+        _PYTEST_RESULT_RE.search(text)
+        or _TEST_OK_LINE_RE.search(text)
+        or text.count("\nPASSED") > 2
+        or text.count("\n.") > 10
+    )
+
+
+def _compress_test_output(text: str) -> str:
+    lines = text.split("\n")
+    result: list[str] = []
+    pass_count = 0
+    dot_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped in (".", "..", "...", "PASSED", "PASS") or (
+            len(stripped) > 3 and all(c == "." for c in stripped)
+        ):
+            dot_count += len(stripped.replace("PASSED", ".").replace("PASS", "."))
+            continue
+        if _TEST_OK_LINE_RE.match(line):
+            pass_count += 1
+            continue
+        if _TEST_FAIL_LINE_RE.match(line) or _PYTEST_RESULT_RE.match(line):
+            if pass_count + dot_count > 0:
+                result.append(f"  [{pass_count + dot_count} tests passed]")
+                pass_count = 0
+                dot_count = 0
+            result.append(line)
+            continue
+        if pass_count + dot_count > 0:
+            result.append(f"  [{pass_count + dot_count} tests passed]")
+            pass_count = 0
+            dot_count = 0
+        result.append(line)
+
+    if pass_count + dot_count > 0:
+        result.append(f"  [{pass_count + dot_count} tests passed]")
+
+    return "\n".join(result)
+
+
+# ── tabular output compression ─────────────────────────────
+
+
+def _has_table(text: str) -> bool:
+    lines = text.split("\n")
+    sep_count = sum(1 for l in lines if _TABLE_SEP_RE.match(l.strip()))
+    pipe_count = sum(1 for l in lines if _TABLE_PIPE_RE.match(l.strip()))
+    return sep_count >= 2 or pipe_count >= 3
+
+
+def _compress_tabular(text: str) -> str:
+    lines = text.split("\n")
+    result: list[str] = []
+    sep_run = 0
+    total_seps = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if _TABLE_SEP_RE.match(stripped):
+            sep_run += 1
+            total_seps += 1
+            if sep_run <= 1 and total_seps <= 3:
+                result.append(line)
+            continue
+        sep_run = 0
+
+        if _TABLE_PIPE_RE.match(stripped):
+            cells = [c.strip() for c in stripped.split("|")]
+            compressed = "|".join(c[:50] for c in cells)
+            result.append(compressed)
+        else:
+            result.append(line)
+
+    return "\n".join(result)
+
+
+# ── path prefix factoring ──────────────────────────────────
+
+
+def _factor_paths(text: str) -> str:
+    paths = _LONG_PATH_RE.findall(text)
+    if len(paths) < 3:
+        return text
+
+    prefix_counts: Counter[str] = Counter()
+    for p in paths:
+        parts = p.split("/")
+        for depth in range(3, len(parts)):
+            prefix = "/".join(parts[:depth])
+            if len(prefix) >= 20:
+                prefix_counts[prefix] += 1
+
+    if not prefix_counts:
+        return text
+
+    best_prefix = max(
+        prefix_counts,
+        key=lambda p: prefix_counts[p] * len(p),
+    )
+    if prefix_counts[best_prefix] < 3:
+        return text
+
+    alias = "$P"
+    header = f"[{alias}={best_prefix}]\n"
+    return header + text.replace(best_prefix, alias)
+
+
+# ── numeric precision reduction ────────────────────────────
+
+
+def _reduce_precision(text: str) -> str:
+    def _trunc(m: re.Match[str]) -> str:
+        val = m.group(0)
+        try:
+            f = float(val)
+            if abs(f) < 1e-6:
+                return "0.0"
+            return f"{f:.3g}"
+        except ValueError:
+            return val
+
+    return _FLOAT_RE.sub(_trunc, text)
+
+
+# ── fuzzy line dedup ───────────────────────────────────────
+
+
+def _fuzzy_dedup(text: str) -> str:
+    lines = text.split("\n")
+    if len(lines) < 10:
+        return text
+
+    bucket_counts: Counter[str] = Counter()
+    for line in lines:
+        sig = _fuzzy_signature(line)
+        if sig:
+            bucket_counts[sig] += 1
+
+    result: list[str] = []
+    emitted: set[str] = set()
+    for line in lines:
+        sig = _fuzzy_signature(line)
+        if not sig:
+            result.append(line)
+            continue
+        if sig not in emitted:
+            emitted.add(sig)
+            result.append(line)
+            if bucket_counts[sig] > 2:
+                result.append(f"  [similar line appears {bucket_counts[sig]}x]")
+
+    return "\n".join(result)
+
+
+def _fuzzy_signature(line: str) -> str:
+    """Normalize a line to a fuzzy signature for grouping."""
+    stripped = line.strip()
+    if len(stripped) < 15:
+        return ""
+    sig = re.sub(r"\d+", "N", stripped)
+    sig = re.sub(r"0x[0-9a-fA-F]+", "0xN", sig)
+    sig = re.sub(r"['\"].*?['\"]", '"S"', sig)
+    sig = re.sub(r"\s+", " ", sig)
+    return sig
 
 
 # ── general compressor ──────────────────────────────────────
