@@ -5338,6 +5338,11 @@ _changed_files_last_signal: dict[str, float] = {}
 # Tools that can mutate the workspace filesystem. ``sys_os_shell`` is
 # included because git-mode change detection derives from `git status`
 # and shell edits are otherwise untracked.
+# Per-session cache for the token saver mode label.  The startup envelope
+# has a 60 s TTL, so we latch the value here on first encounter so
+# compression stays active for the whole session.
+_token_saver_mode_cache: dict[str, str] = {}
+
 _CHANGED_FILES_TOOLS = frozenset(
     {SysOsWriteTool.name(), SysOsEditTool.name(), SysOsShellTool.name()}
 )
@@ -5399,6 +5404,7 @@ async def dispatch_tool_locally(
     session_async_tasks: dict[str, tuple[asyncio.Task[str], asyncio.Event]] | None = None,
     publish_event: Callable[[str, _JsonObject], None] | None = None,
     filesystem_registry: FilesystemRegistry | None = None,
+    session_labels: dict[str, str] | None = None,
 ) -> str:
     """Execute a tool locally and PATCH the result to the harness.
 
@@ -5441,6 +5447,59 @@ async def dispatch_tool_locally(
         filesystem_registry=filesystem_registry,
         publish_event=publish_event,
     )
+
+    # Token saver: compress tool output before feeding it to the harness.
+    # The session_labels dict comes from the startup envelope which has a 60s
+    # TTL — cache the resolved value per-session so compression stays active
+    # for the entire session lifetime.
+    import contextlib
+
+    _ts_label = _token_saver_mode_cache.get(conversation_id, "") if conversation_id else ""
+    if not _ts_label:
+        _ts_label = (session_labels or {}).get("omnigent.token_saver", "")
+        if not _ts_label and server_client and conversation_id:
+            with contextlib.suppress(Exception):
+                _resp = await server_client.get(
+                    f"/v1/sessions/{conversation_id}/labels",
+                    timeout=3.0,
+                )
+                if _resp.status_code == 200:
+                    _ts_label = _resp.json().get("labels", {}).get("omnigent.token_saver", "")
+        if _ts_label and conversation_id:
+            _token_saver_mode_cache[conversation_id] = _ts_label
+    if _ts_label and _ts_label != "off":
+        from omnigent.runner.tool_output_compressor import (
+            compress_tool_output,
+            get_session_stats,
+            parse_algo_label,
+            stats_changed_since_last_sync,
+        )
+
+        output = compress_tool_output(
+            output,
+            tool_name,
+            enabled_algos=parse_algo_label(_ts_label),
+            session_id=conversation_id,
+        )
+
+        # Persist cumulative stats to a session label so the frontend can
+        # display savings.  Only PATCH when stats actually changed.
+        if (
+            server_client
+            and conversation_id
+            and stats_changed_since_last_sync(conversation_id)
+        ):
+            import json as _json
+
+            _stats_val = _json.dumps(
+                get_session_stats(conversation_id), separators=(",", ":"),
+            )
+            with contextlib.suppress(Exception):
+                await server_client.patch(
+                    f"/v1/sessions/{conversation_id}",
+                    json={"labels": {"omnigent.token_saver_stats": _stats_val}},
+                    timeout=5.0,
+                )
 
     # A file-mutating tool just ran — nudge the web to refetch the
     # changed-files list (throttled, coalesced client-side).

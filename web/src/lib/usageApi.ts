@@ -7,6 +7,14 @@ interface DailyCostWire {
   cost_usd: number;
 }
 
+interface TokenSaverStatsWire {
+  tokens_saved?: number;
+  cost_saved_usd?: number;
+  compressions?: number;
+  chars_saved?: number;
+  original_chars?: number;
+}
+
 interface SessionUsageWire {
   id: string;
   created_at: number;
@@ -17,6 +25,7 @@ interface SessionUsageWire {
   harness: string | null;
   llm_model: string | null;
   agent_name: string | null;
+  token_saver_stats: TokenSaverStatsWire | null;
 }
 
 interface UsageReportWire {
@@ -24,6 +33,8 @@ interface UsageReportWire {
   cost_last_7d: number;
   cost_last_30d: number;
   total_cost_usd: number;
+  total_tokens_saved: number;
+  total_cost_saved_usd: number;
   daily_costs: DailyCostWire[];
   sessions: SessionUsageWire[];
 }
@@ -33,6 +44,14 @@ interface UsageReportWire {
 export interface DailyCost {
   day: string;
   costUsd: number;
+}
+
+export interface TokenSaverStats {
+  tokensSaved: number;
+  costSavedUsd: number;
+  compressions: number;
+  charsSaved: number;
+  originalChars: number;
 }
 
 export interface SessionUsage {
@@ -45,6 +64,7 @@ export interface SessionUsage {
   harness: string | null;
   llmModel: string | null;
   agentName: string | null;
+  tokenSaverStats: TokenSaverStats | null;
 }
 
 export interface UsageReport {
@@ -52,6 +72,8 @@ export interface UsageReport {
   costLast7d: number;
   costLast30d: number;
   totalCostUsd: number;
+  totalTokensSaved: number;
+  totalCostSavedUsd: number;
   dailyCosts: DailyCost[];
   sessions: SessionUsage[];
 }
@@ -67,6 +89,8 @@ export async function fetchUsageReport(): Promise<UsageReport> {
     costLast7d: wire.cost_last_7d,
     costLast30d: wire.cost_last_30d,
     totalCostUsd: wire.total_cost_usd,
+    totalTokensSaved: wire.total_tokens_saved ?? 0,
+    totalCostSavedUsd: wire.total_cost_saved_usd ?? 0,
     dailyCosts: (wire.daily_costs ?? []).map((d) => ({ day: d.day, costUsd: d.cost_usd })),
     sessions: (wire.sessions ?? []).map((s) => ({
       id: s.id,
@@ -78,6 +102,15 @@ export async function fetchUsageReport(): Promise<UsageReport> {
       harness: s.harness ?? null,
       llmModel: s.llm_model ?? null,
       agentName: s.agent_name ?? null,
+      tokenSaverStats: s.token_saver_stats
+        ? {
+            tokensSaved: s.token_saver_stats.tokens_saved ?? 0,
+            costSavedUsd: s.token_saver_stats.cost_saved_usd ?? 0,
+            compressions: s.token_saver_stats.compressions ?? 0,
+            charsSaved: s.token_saver_stats.chars_saved ?? 0,
+            originalChars: s.token_saver_stats.original_chars ?? 0,
+          }
+        : null,
     })),
   };
 }

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { CalendarIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
+import { CalendarIcon, Loader2Icon, TriangleAlertIcon, ZapIcon } from "lucide-react";
 import { PageScroll } from "@/components/PageScroll";
 import { CostTimelineChart } from "@/components/usage/CostTimelineChart";
 import { UsageBreakdownCharts } from "@/components/usage/UsageBreakdownCharts";
@@ -69,6 +69,12 @@ function filterSessions(
   const sinceEpoch = since ? new Date(since + "T00:00:00Z").getTime() / 1000 : 0;
   const untilEpoch = until ? new Date(until + "T23:59:59Z").getTime() / 1000 : Infinity;
   return sessions.filter((s) => s.updatedAt >= sinceEpoch && s.updatedAt <= untilEpoch);
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 export function UsagePage() {
@@ -157,14 +163,31 @@ export function UsagePage() {
 
         {data && (
           <div className="flex flex-col gap-8">
-            <div className="rounded-lg border border-border bg-card p-4">
-              <p className="text-xs text-muted-foreground">Total cost</p>
-              <p className="mt-1 text-2xl font-semibold tabular-nums">
-                {formatSessionCostUsd(totalCost)}
-              </p>
-              <p className="mt-0.5 text-xs text-muted-foreground">
-                {filteredSessions.length} session{filteredSessions.length !== 1 && "s"}
-              </p>
+            <div className="flex gap-4">
+              <div className="flex-1 rounded-lg border border-border bg-card p-4">
+                <p className="text-xs text-muted-foreground">Total cost</p>
+                <p className="mt-1 text-2xl font-semibold tabular-nums">
+                  {formatSessionCostUsd(totalCost)}
+                </p>
+                <p className="mt-0.5 text-xs text-muted-foreground">
+                  {filteredSessions.length} session{filteredSessions.length !== 1 && "s"}
+                </p>
+              </div>
+
+              {data.totalTokensSaved > 0 && (
+                <div className="flex-1 rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-4">
+                  <p className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+                    <ZapIcon className="size-3" />
+                    Token Savings
+                  </p>
+                  <p className="mt-1 text-2xl font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                    {fmtTokens(data.totalTokensSaved)}
+                  </p>
+                  <p className="mt-0.5 text-xs text-emerald-600/70 dark:text-emerald-400/70">
+                    {formatSessionCostUsd(data.totalCostSavedUsd)} saved
+                  </p>
+                </div>
+              )}
             </div>
 
             <section>

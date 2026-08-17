@@ -82,6 +82,12 @@ CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY = "omnigent.codex_native.bypass_sandbox"
 # runs inside NVIDIA OpenShell's filesystem/network/process isolation.
 OPENSHELL_SANDBOX_LABEL_KEY = "omnigent.openshell_sandbox"
 
+# Per-session token saver toggle.  When ``"1"`` the runner applies
+# deterministic compression to tool outputs before feeding them to the
+# harness, reducing context-window token consumption.
+TOKEN_SAVER_LABEL_KEY = "omnigent.token_saver"
+TOKEN_SAVER_STATS_LABEL_KEY = "omnigent.token_saver_stats"
+
 # Reserved label key that stores a session's sidebar "project" membership
 # (implicit collections — a project exists while ≥1 session carries this key).
 # Namespaced so it never collides with the user-facing "project" term or other
@@ -173,6 +179,8 @@ _INSTANCE_SCOPED_LABEL_KEYS = frozenset(
         "omnigent.last_context_window",
         CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY,
         OPENSHELL_SANDBOX_LABEL_KEY,
+        TOKEN_SAVER_LABEL_KEY,
+        TOKEN_SAVER_STATS_LABEL_KEY,
     }
 )
 

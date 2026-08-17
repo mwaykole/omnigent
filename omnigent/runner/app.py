@@ -2682,6 +2682,12 @@ def create_runner_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/v1/sessions/{session_id}/token-saver-stats")
+    async def token_saver_stats(session_id: str) -> dict[str, object]:
+        from omnigent.runner.tool_output_compressor import get_session_stats
+
+        return get_session_stats(session_id)
+
     @app.post(
         "/v1/sessions/{conversation_id}/background-title",
         response_model=BackgroundSessionTitleResponse,
@@ -4998,6 +5004,61 @@ def create_runner_app(
         _interrupted_sessions.discard(conv_id)
         return True
 
+    async def _track_token_saver_stats(
+        conv_id: str,
+        output: str,
+        tool_name: str,
+        srv_client: httpx.AsyncClient | None,
+        session_labels: Mapping[str, str] | None,
+    ) -> None:
+        """Measure compression savings for tool outputs observed in the SSE stream."""
+        import contextlib
+
+        from omnigent.runner.tool_dispatch import _token_saver_mode_cache
+        from omnigent.runner.tool_output_compressor import (
+            compress_tool_output,
+            get_session_stats,
+            parse_algo_label,
+            stats_changed_since_last_sync,
+        )
+
+        _ts_label = _token_saver_mode_cache.get(conv_id, "")
+        if not _ts_label:
+            _ts_label = (session_labels or {}).get("omnigent.token_saver", "")
+            if not _ts_label and srv_client:
+                with contextlib.suppress(Exception):
+                    _r = await srv_client.get(
+                        f"/v1/sessions/{conv_id}/labels", timeout=3.0,
+                    )
+                    if _r.status_code == 200:
+                        _ts_label = _r.json().get("labels", {}).get(
+                            "omnigent.token_saver", "",
+                        )
+            if _ts_label:
+                _token_saver_mode_cache[conv_id] = _ts_label
+        if not _ts_label or _ts_label == "off":
+            return
+
+        compressed = compress_tool_output(
+            output, tool_name,
+            enabled_algos=parse_algo_label(_ts_label),
+            session_id=conv_id,
+        )
+        _ = compressed  # result unused; _record_stats was called inside
+
+        if srv_client and stats_changed_since_last_sync(conv_id):
+            import json as _json
+
+            _sv = _json.dumps(
+                get_session_stats(conv_id), separators=(",", ":"),
+            )
+            with contextlib.suppress(Exception):
+                await srv_client.patch(
+                    f"/v1/sessions/{conv_id}",
+                    json={"labels": {"omnigent.token_saver_stats": _sv}},
+                    timeout=5.0,
+                )
+
     def _on_proxy_stream_end(
         conv_id: str,
         *,
@@ -6408,6 +6469,22 @@ def create_runner_app(
                                                     "output": _item["output"],
                                                 }
                                             )
+                                            # Token saver: measure compression
+                                            # savings from tool outputs that
+                                            # flowed through the harness (e.g.
+                                            # claude-native).
+                                            _fco_output = _item.get("output", "")
+                                            if (
+                                                isinstance(_fco_output, str)
+                                                and len(_fco_output) > 500
+                                            ):
+                                                await _track_token_saver_stats(
+                                                    conv_id,
+                                                    _fco_output,
+                                                    _item.get("name", ""),
+                                                    server_client,
+                                                    startup_labels,
+                                                )
                                 elif _evt_type == "response.compaction.completed" and event.get(
                                     "summary"
                                 ):
@@ -6522,6 +6599,7 @@ def create_runner_app(
                                                     ),
                                                     publish_event=_publish_event,
                                                     filesystem_registry=filesystem_registry,
+                                                    session_labels=startup_labels,
                                                 )
                                             )
                                         )

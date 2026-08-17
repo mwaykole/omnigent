@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link } from "@/lib/routing";
-import { ArrowDownIcon, ArrowUpIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ZapIcon } from "lucide-react";
 import type { SessionUsage } from "@/lib/usageApi";
 import { formatSessionCostUsd } from "@/lib/formatCost";
 
@@ -33,6 +33,18 @@ function formatRelativeDate(epochSec: number): string {
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
   if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
   return new Date(epochSec * 1000).toLocaleDateString();
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function fmtSavingsCost(usd: number): string {
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
 }
 
 function compareSessions(a: SessionUsage, b: SessionUsage, key: SortKey, dir: SortDir): number {
@@ -104,6 +116,12 @@ export function UsageSessionTable({ sessions }: Props) {
                 </span>
               </th>
             ))}
+            <th className="px-3 py-2 text-right font-medium text-emerald-600 dark:text-emerald-400">
+              <span className="inline-flex items-center gap-1">
+                <ZapIcon className="h-3 w-3" />
+                Saved
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -125,6 +143,15 @@ export function UsageSessionTable({ sessions }: Props) {
               </td>
               <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground">
                 {formatRelativeDate(s.updatedAt)}
+              </td>
+              <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                {s.tokenSaverStats ? (
+                  <span title={`${s.tokenSaverStats.compressions} compressions`}>
+                    {fmtTokens(s.tokenSaverStats.tokensSaved)} / {fmtSavingsCost(s.tokenSaverStats.costSavedUsd)}
+                  </span>
+                ) : (
+                  <span className="text-muted-foreground">—</span>
+                )}
               </td>
             </tr>
           ))}

@@ -30,6 +30,7 @@ import type { Agent } from "@/hooks/useAgents";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { cn } from "@/lib/utils";
 import { TAB_BADGE_BASE } from "./railTabs";
+import { TokenSaverToggle } from "./TokenSaverToggle";
 import { ViewModeToggle } from "./ViewModeToggle";
 import { useCallback, useEffect, useRef } from "react";
 
@@ -326,6 +327,7 @@ export function ChatHeader({
         {/* Agent info: tools & policies for the bound agent. Desktop-only
             popover; self-hides when the agent has neither configured. */}
         {conversationId && <AgentInfoButton agent={boundAgent} sessionId={conversationId} />}
+        {conversationId && <TokenSaverToggle conversationId={conversationId} />}
         {/* Chat/Terminal switcher for terminal-first sessions — self-gates to
             null otherwise (and in the iOS shell, where it's the native bar). */}
         {conversationId && <ViewModeToggle />}

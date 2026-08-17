@@ -82,6 +82,99 @@ def _resolve_session_harness(conv: Conversation) -> str | None:
     return _resolve_harness_impl(conv)
 
 
+def _parse_token_saver_stats(
+    conv: Conversation,
+    conversation_store: ConversationStore,
+) -> dict[str, Any] | None:
+    """Return token saver stats for a session.
+
+    First checks the ``omnigent.token_saver_stats`` label (written by the
+    runner).  If absent and token saver is enabled, computes stats from
+    the session's stored ``function_call_output`` items.
+    """
+    import json
+
+    raw = conv.labels.get("omnigent.token_saver_stats")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and parsed.get("compressions", 0) > 0:
+                return parsed
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    ts_mode = conv.labels.get("omnigent.token_saver", "")
+    if not ts_mode or ts_mode == "off":
+        return None
+
+    return _compute_token_saver_stats(conv.id, conversation_store)
+
+
+def _compute_token_saver_stats(
+    session_id: str,
+    conversation_store: ConversationStore,
+) -> dict[str, Any] | None:
+    """Compute token saver stats from stored items."""
+    from omnigent.runner.tool_output_compressor import (
+        compress_tool_output,
+        parse_algo_label,
+    )
+
+    algos = parse_algo_label("all")
+    total_original = 0
+    total_compressed = 0
+    compressions = 0
+
+    # Build call_id → tool_name map and collect outputs in one pass.
+    call_names: dict[str, str] = {}
+    outputs: list[tuple[str, str]] = []  # (tool_name, output)
+
+    after: str | None = None
+    while True:
+        page = conversation_store.list_items(
+            session_id, limit=200, after=after, order="asc",
+        )
+        for item in page.data:
+            if item.type == "function_call":
+                call_id = getattr(item.data, "call_id", "")
+                name = getattr(item.data, "name", "")
+                if call_id and name:
+                    call_names[call_id] = name
+            elif item.type == "function_call_output":
+                call_id = getattr(item.data, "call_id", "")
+                output = getattr(item.data, "output", "") or ""
+                if isinstance(output, str) and len(output) >= 500:
+                    outputs.append((call_id, output))
+        if not page.has_more:
+            break
+        after = page.last_id
+
+    for call_id, output in outputs:
+        tool_name = call_names.get(call_id, "")
+        compressed = compress_tool_output(
+            output, tool_name, enabled_algos=algos,
+        )
+        saved = len(output) - len(compressed)
+        if saved > 0:
+            total_original += len(output)
+            total_compressed += len(compressed)
+            compressions += 1
+
+    if compressions == 0:
+        return None
+
+    chars_saved = total_original - total_compressed
+    tokens_saved = int(chars_saved / 3.5)
+    cost_saved = round(tokens_saved / 1000 * 0.003, 4)
+    return {
+        "chars_saved": chars_saved,
+        "original_chars": total_original,
+        "compressions": compressions,
+        "tokens_saved": tokens_saved,
+        "cost_saved_usd": cost_saved,
+    }
+
+
 def _session_cost(usage: dict[str, Any]) -> float:
     """
     Read a session's authoritative cumulative cost, or ``0.0`` when unpriced.
@@ -132,6 +225,8 @@ def _build_usage_report(
     total = conversation_store.sum_daily_cost(rollup_user, _EPOCH_DAY)
 
     sessions: list[SessionUsage] = []
+    agg_tokens_saved = 0
+    agg_cost_saved = 0.0
     after: str | None = None
     while True:
         page = conversation_store.list_conversations(
@@ -147,6 +242,10 @@ def _build_usage_report(
             if conv.agent_id is None:
                 continue
             usage = load_session_usage(conv.id, conversation_store)
+            ts_stats = _parse_token_saver_stats(conv, conversation_store)
+            if ts_stats:
+                agg_tokens_saved += ts_stats.get("tokens_saved", 0)
+                agg_cost_saved += ts_stats.get("cost_saved_usd", 0.0)
             sessions.append(
                 SessionUsage(
                     id=conv.id,
@@ -158,6 +257,7 @@ def _build_usage_report(
                     harness=_resolve_session_harness(conv),
                     llm_model=conv.model_override or _resolve_llm_model(conv),
                     agent_name=conv.sub_agent_name,
+                    token_saver_stats=ts_stats,
                 )
             )
         if not page.has_more:
@@ -171,6 +271,8 @@ def _build_usage_report(
         cost_last_7d=cost_7d,
         cost_last_30d=cost_30d,
         total_cost_usd=total,
+        total_tokens_saved=agg_tokens_saved,
+        total_cost_saved_usd=round(agg_cost_saved, 4),
         daily_costs=[DailyCost(day=d, cost_usd=c) for d, c in daily_costs_raw],
         sessions=sessions,
     )

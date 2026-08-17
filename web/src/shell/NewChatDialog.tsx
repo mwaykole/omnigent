@@ -365,6 +365,7 @@ const CODEX_NATIVE_APPROVAL_MODES: {
 // `--sandbox` / `--ask-for-approval` flags those presets would emit.
 const CODEX_NATIVE_BYPASS_SANDBOX_LABEL_KEY = "omnigent.codex_native.bypass_sandbox";
 const OPENSHELL_SANDBOX_LABEL_KEY = "omnigent.openshell_sandbox";
+const TOKEN_SAVER_LABEL_KEY = "omnigent.token_saver";
 // Bypass is the most-permissive Codex approval stance — presented as a 4th
 // option in the Codex approval dropdown (Codex only; OpenCode shares the
 // presets above but has no bypass). It rides as a conversation label, not
@@ -3713,6 +3714,9 @@ export function NewChatLandingScreen() {
       if (openshellSandbox) {
         baseLabels = { ...(baseLabels ?? {}), [OPENSHELL_SANDBOX_LABEL_KEY]: "1" };
       }
+      // Token saver on by default (all algorithms) — stamp the label so the
+      // runner compresses tool outputs from the first turn.
+      baseLabels = { ...(baseLabels ?? {}), [TOKEN_SAVER_LABEL_KEY]: "all" };
       const createLabels = selectedProject
         ? { ...(baseLabels ?? {}), [PROJECT_LABEL_KEY]: selectedProject }
         : baseLabels;

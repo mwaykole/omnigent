@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ArrowDownIcon, ArrowUpIcon, Loader2Icon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, Loader2Icon, ZapIcon } from "lucide-react";
 import { useUsageReport } from "@/hooks/useUsageReport";
 import type { SessionUsage } from "@/lib/usageApi";
 import { shortModelName } from "@/components/CostRoutingControl";
@@ -9,6 +9,12 @@ function fmtCost(usd: number): string {
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
   if (usd < 1) return `$${usd.toFixed(3)}`;
   return `$${usd.toFixed(2)}`;
+}
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 function relativeTime(epochSec: number): string {
@@ -90,6 +96,31 @@ export function UsageSection() {
         <CostCard label="All time" cost={data.totalCostUsd} highlight />
       </div>
 
+      {data.totalTokensSaved > 0 && (
+        <div className="mt-3 rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <ZapIcon className="size-4 text-emerald-500" />
+            <span className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+              Token Saver
+            </span>
+          </div>
+          <div className="mt-2 flex gap-6 text-sm">
+            <div>
+              <span className="text-muted-foreground">Tokens saved: </span>
+              <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                {fmtTokens(data.totalTokensSaved)}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Cost saved: </span>
+              <span className="font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                {fmtCost(data.totalCostSavedUsd)}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mt-8">
         <h2 className="text-lg font-medium">Sessions</h2>
         {sortedSessions.length === 0 ? (
@@ -108,6 +139,12 @@ export function UsageSection() {
                       dir={sortField === "date" ? sortDir : undefined}
                       onClick={() => toggleSort("date")}
                     />
+                  </th>
+                  <th className="px-3 py-2 text-right font-medium">
+                    <span className="inline-flex items-center gap-1 justify-end text-emerald-600 dark:text-emerald-400">
+                      <ZapIcon className="size-3" />
+                      Saved
+                    </span>
                   </th>
                   <th className="px-3 py-2 text-right font-medium">
                     <SortButton
@@ -221,6 +258,11 @@ function SessionRow({ session }: { session: SessionUsage }) {
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
         {relativeTime(session.updatedAt)}
+      </td>
+      <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+        {session.tokenSaverStats
+          ? `${fmtTokens(session.tokenSaverStats.tokensSaved)} / ${fmtCost(session.tokenSaverStats.costSavedUsd)}`
+          : <span className="text-muted-foreground">—</span>}
       </td>
       <td className="whitespace-nowrap px-3 py-2 text-right tabular-nums font-medium">
         {fmtCost(session.costUsd)}

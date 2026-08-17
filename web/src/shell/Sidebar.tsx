@@ -49,6 +49,7 @@ import {
   Trash2Icon,
   WalletIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 import {
   DndContext,
@@ -468,20 +469,38 @@ export function useMigrateLocalPinsToServer(
 
 function SidebarCostBadge() {
   const { data } = useUsageReport();
-  if (!data || data.costToday === 0) return null;
+  if (!data || (data.costToday === 0 && !data.totalTokensSaved)) return null;
   const cost = data.costToday < 0.01
     ? `$${data.costToday.toFixed(4)}`
     : data.costToday < 1
       ? `$${data.costToday.toFixed(3)}`
       : `$${data.costToday.toFixed(2)}`;
+  const tokensSaved = data.totalTokensSaved ?? 0;
+  const fmtSaved =
+    tokensSaved >= 1_000_000 ? `${(tokensSaved / 1_000_000).toFixed(1)}M`
+    : tokensSaved >= 1_000 ? `${(tokensSaved / 1_000).toFixed(1)}K`
+    : String(tokensSaved);
   return (
     <div className="mx-3 mt-2">
       <Link
         to="/settings/usage"
-        className="flex items-center justify-between rounded-md bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className="flex flex-col gap-1 rounded-md bg-muted/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
       >
-        <span>Today&apos;s spend</span>
-        <span className="font-medium tabular-nums">{cost}</span>
+        {data.costToday > 0 && (
+          <span className="flex items-center justify-between">
+            <span>Today&apos;s spend</span>
+            <span className="font-medium tabular-nums">{cost}</span>
+          </span>
+        )}
+        {tokensSaved > 0 && (
+          <span className="flex items-center justify-between text-emerald-600 dark:text-emerald-400">
+            <span className="flex items-center gap-1">
+              <ZapIcon className="size-3" />
+              Tokens saved
+            </span>
+            <span className="font-medium tabular-nums">{fmtSaved}</span>
+          </span>
+        )}
       </Link>
     </div>
   );

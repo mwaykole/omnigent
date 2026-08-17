@@ -4110,6 +4110,8 @@ function CostIntelligenceIndicator({ costRoutingEligible }: { costRoutingEligibl
   const sessionUsageByModel = useChatStore((s) => s.sessionUsageByModel);
   const costControlModeOverride = useChatStore((s) => s.costControlModeOverride);
   const llmModel = useChatStore((s) => s.llmModel);
+  const conversationId = useChatStore((s) => s.conversationId);
+  const { session } = useSession(conversationId);
   const routingOn = costRoutingEligible && costControlModeOverride === "on";
   const cost = sessionCostUsd ?? 0;
   const currentModel = llmModel ? shortModelName(llmModel) : null;
@@ -4127,6 +4129,24 @@ function CostIntelligenceIndicator({ costRoutingEligible }: { costRoutingEligibl
       .filter((m) => m.cost > 0 || m.input > 0)
       .sort((a, b) => b.cost - a.cost);
   }, [sessionUsageByModel]);
+
+  const tokenSaverStats = useMemo(() => {
+    const raw = session?.labels?.["omnigent.token_saver_stats"];
+    if (!raw) return null;
+    try {
+      const p = JSON.parse(raw) as {
+        tokens_saved?: number;
+        cost_saved_usd?: number;
+        compressions?: number;
+        chars_saved?: number;
+        original_chars?: number;
+      };
+      if (typeof p.tokens_saved !== "number" || !p.compressions) return null;
+      return p;
+    } catch {
+      return null;
+    }
+  }, [session?.labels]);
 
   const fmtCost = (usd: number): string => {
     if (usd === 0) return "$0.00";
@@ -4228,6 +4248,48 @@ function CostIntelligenceIndicator({ costRoutingEligible }: { costRoutingEligibl
               <ZapIcon className="size-3 text-amber-500" />
               Model auto-selected per turn to optimize cost and quality.
             </span>
+          </div>
+        )}
+
+        {tokenSaverStats && (
+          <div className="mt-3 rounded-md bg-emerald-500/5 px-2.5 py-2">
+            <div className="mb-1.5 flex items-center gap-1.5 text-emerald-600 dark:text-emerald-400">
+              <ZapIcon className="size-3" />
+              <span className="text-[10px] font-medium uppercase tracking-wide">
+                Token Saver
+              </span>
+            </div>
+            <div className="space-y-1 text-muted-foreground">
+              <div className="flex justify-between">
+                <span>Tokens saved</span>
+                <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                  {fmtTokens(tokenSaverStats.tokens_saved ?? 0)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Cost saved</span>
+                <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                  {fmtCost(tokenSaverStats.cost_saved_usd ?? 0)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Compressions</span>
+                <span>{tokenSaverStats.compressions}</span>
+              </div>
+              {(tokenSaverStats.original_chars ?? 0) > 0 && (
+                <div className="flex justify-between">
+                  <span>Reduction</span>
+                  <span className="font-medium text-emerald-600 dark:text-emerald-400">
+                    {Math.round(
+                      ((tokenSaverStats.chars_saved ?? 0) /
+                        (tokenSaverStats.original_chars ?? 1)) *
+                        100,
+                    )}
+                    %
+                  </span>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </PopoverContent>
