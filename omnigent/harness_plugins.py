@@ -317,6 +317,8 @@ _BUILTIN_NATIVE_PROVIDERS: tuple[NativeHarnessProvider, ...] = tuple(
         HERMES_NATIVE_CODING_AGENT,
     )
 )
+
+
 # Ollama reuses the codex-native executor but needs its own agent identity
 # so it appears as a separate entry in the picker.
 def _materialize_ollama_agent_spec(
@@ -390,8 +392,7 @@ def _materialize_nemotron_agent_spec(
         "executor": executor,
         "spawn": True,
         "os_env": {
-            "TERM": "xterm-256color",
-            "NO_COLOR": "1",
+            "type": "caller_process",
         },
     }
     yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -923,7 +924,11 @@ _BUILTIN_CONTRIBUTION = HarnessContribution(
         OLLAMA_NATIVE_CODING_AGENT,
         NEMOTRON_NATIVE_CODING_AGENT,
     ),
-    native_providers=(*_BUILTIN_NATIVE_PROVIDERS, _OLLAMA_NATIVE_PROVIDER, _NEMOTRON_NATIVE_PROVIDER),
+    native_providers=(
+        *_BUILTIN_NATIVE_PROVIDERS,
+        _OLLAMA_NATIVE_PROVIDER,
+        _NEMOTRON_NATIVE_PROVIDER,
+    ),
     # Catalog rows gate readiness on their vendor binary; the install spec also
     # feeds setup steps and (for npm rows) the one-click install path.
     install_specs={name: row.install for name, row in ACP_CLI_HARNESSES.items()},
