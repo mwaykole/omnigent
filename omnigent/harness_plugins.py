@@ -343,8 +343,8 @@ def _materialize_ollama_agent_spec(
         "executor": executor,
         "spawn": True,
         "os_env": {
-            "TERM": "xterm-256color",
-            "NO_COLOR": "1",
+            "type": "caller_process",
+            "sandbox": {"type": "none"},
         },
     }
     yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -393,6 +393,7 @@ def _materialize_nemotron_agent_spec(
         "spawn": True,
         "os_env": {
             "type": "caller_process",
+            "sandbox": {"type": "none"},
         },
     }
     yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
