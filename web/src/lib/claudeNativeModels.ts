@@ -9,19 +9,25 @@
  * import.
  */
 export const CLAUDE_NATIVE_MODELS = [
-  // Ordered by capability tier, most powerful first.
-  { id: "fable", label: "Fable" },
-  { id: "opus", label: "Opus" },
-  // The "sonnet" alias stays pinned to the workspace's existing default
-  // Sonnet (4.6); relabelled from the bare "Sonnet" only so it reads
-  // unambiguously next to the opt-in row below. Its model binding is
-  // unchanged — picking this row resolves exactly as it did before.
-  { id: "sonnet", label: "Sonnet 4.6" },
-  // Newer Sonnet, offered as an explicit opt-in via Claude Code's one
-  // custom /model slot (ANTHROPIC_CUSTOM_MODEL_OPTION) — not a family
-  // alias, and it does NOT change the default "sonnet" binding above.
-  { id: "sonnet_5", label: "Sonnet 5" },
-  { id: "haiku", label: "Haiku" },
+  // --- Aliases (resolve to the latest installed version) ---
+  { id: "fable", label: "Fable (latest)" },
+  { id: "opus", label: "Opus (latest)" },
+  { id: "sonnet", label: "Sonnet (latest)" },
+  { id: "haiku", label: "Haiku (latest)" },
+
+  // --- Pinned versions, newest first ---
+  { id: "claude-fable-5", label: "Fable 5" },
+  { id: "claude-mythos-5", label: "Mythos 5" },
+  { id: "claude-opus-5", label: "Opus 5" },
+  { id: "claude-opus-4-8", label: "Opus 4.8" },
+  { id: "claude-opus-4-7", label: "Opus 4.7" },
+  { id: "claude-opus-4-6", label: "Opus 4.6" },
+  { id: "claude-opus-4-5", label: "Opus 4.5" },
+  { id: "claude-opus-4-1", label: "Opus 4.1" },
+  { id: "claude-sonnet-5", label: "Sonnet 5" },
+  { id: "claude-sonnet-4-6", label: "Sonnet 4.6" },
+  { id: "claude-sonnet-4-5", label: "Sonnet 4.5" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5" },
 ] as const;
 
 /**
