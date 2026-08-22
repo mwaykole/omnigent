@@ -2254,6 +2254,100 @@ def test_normalize_responses_items_message_image_filename_stripped() -> None:
     assert result[0] is not items[0]
 
 
+class TestSystemPromptPrefix(unittest.TestCase):
+    """system_prompt_prefix is prepended to agent instructions."""
+
+    def test_prefix_prepended_to_system_prompt(self):
+        """When system_prompt_prefix is set, it appears before the system prompt."""
+
+        async def _t():
+            _FakeRunner.last_calls = []
+            _FakeRunner.next_result = _FakeResult(events=[], final_output="done")
+            fake_sdk = _fake_agents_sdk()
+            executor = OpenAIAgentsSDKExecutor(
+                client=object(),
+                system_prompt_prefix="You are a coding assistant.",
+            )
+            with patch(
+                "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+                return_value=fake_sdk,
+            ):
+                state = executor._get_or_create_session_state(fake_sdk, "test-key")
+                agent = executor._get_or_create_agent(
+                    fake_sdk,
+                    state,
+                    model="test-model",
+                    system_prompt="Help the user.",
+                    tools=[],
+                    parallel_tool_calls=None,
+                    reasoning_effort=None,
+                    max_tokens=None,
+                )
+                self.assertTrue(agent.instructions.startswith("You are a coding assistant."))
+                self.assertIn("Help the user.", agent.instructions)
+
+        _run(_t())
+
+    def test_prefix_alone_when_no_system_prompt(self):
+        """When system_prompt is empty, prefix is used as the full instructions."""
+
+        async def _t():
+            _FakeRunner.last_calls = []
+            _FakeRunner.next_result = _FakeResult(events=[], final_output="done")
+            fake_sdk = _fake_agents_sdk()
+            executor = OpenAIAgentsSDKExecutor(
+                client=object(),
+                system_prompt_prefix="You are a coding assistant.",
+            )
+            with patch(
+                "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+                return_value=fake_sdk,
+            ):
+                state = executor._get_or_create_session_state(fake_sdk, "test-key")
+                agent = executor._get_or_create_agent(
+                    fake_sdk,
+                    state,
+                    model="test-model",
+                    system_prompt="",
+                    tools=[],
+                    parallel_tool_calls=None,
+                    reasoning_effort=None,
+                    max_tokens=None,
+                )
+                self.assertEqual(agent.instructions, "You are a coding assistant.")
+
+        _run(_t())
+
+    def test_no_prefix_passes_prompt_through(self):
+        """When system_prompt_prefix is None, system_prompt is unchanged."""
+
+        async def _t():
+            _FakeRunner.last_calls = []
+            _FakeRunner.next_result = _FakeResult(events=[], final_output="done")
+            fake_sdk = _fake_agents_sdk()
+            executor = OpenAIAgentsSDKExecutor(
+                client=object(),
+            )
+            with patch(
+                "omnigent.inner.openai_agents_sdk_executor._ensure_agents_sdk",
+                return_value=fake_sdk,
+            ):
+                state = executor._get_or_create_session_state(fake_sdk, "test-key")
+                agent = executor._get_or_create_agent(
+                    fake_sdk,
+                    state,
+                    model="test-model",
+                    system_prompt="Help the user.",
+                    tools=[],
+                    parallel_tool_calls=None,
+                    reasoning_effort=None,
+                    max_tokens=None,
+                )
+                self.assertEqual(agent.instructions, "Help the user.")
+
+        _run(_t())
+
+
 def test_is_context_length_exceeded_direct_code() -> None:
     """
     ``_is_context_length_exceeded`` returns ``True`` for a direct

@@ -1021,6 +1021,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         base_url_override: str | None = None,
         gateway_host: str | None = None,
         gateway_auth_command: str | None = None,
+        system_prompt_prefix: str | None = None,
     ) -> None:
         """Create an OpenAIAgentsSDKExecutor.
 
@@ -1066,6 +1067,11 @@ class OpenAIAgentsSDKExecutor(Executor):
             ``"databricks auth token --host https://example.databricks.com ..."``
             or ``"printf %s sk-..."``. Set from
             ``HARNESS_OPENAI_AGENTS_GATEWAY_AUTH_COMMAND``.
+        :param system_prompt_prefix: Optional harness-level instruction prefix
+            prepended to the system prompt. When set, the prefix appears
+            before the system prompt with a ``\n\n`` separator. Used by
+            harnesses to inject role-specific instructions (e.g., "You are
+            a coding assistant.") without modifying the agent spec.
         """
         self._retry_policy = retry_policy if retry_policy is not None else RetryPolicy()
         raw_client = (
@@ -1098,6 +1104,7 @@ class OpenAIAgentsSDKExecutor(Executor):
         self._databricks = _is_databricks_openai_client(self._client)
         self._tool_executor: ToolExecutor | None = None
         self._session_states: dict[str, _AgentsSessionState] = {}
+        self._system_prompt_prefix = system_prompt_prefix
 
     def supports_streaming(self) -> bool:
         return True
@@ -1387,6 +1394,13 @@ class OpenAIAgentsSDKExecutor(Executor):
         reasoning_effort: str | None,
         max_tokens: int | None,
     ) -> SDKAgent:
+        # Prepend harness-level system prompt prefix if configured.
+        if self._system_prompt_prefix:
+            if system_prompt:
+                system_prompt = f"{self._system_prompt_prefix}\n\n{system_prompt}"
+            else:
+                system_prompt = self._system_prompt_prefix
+
         signature = (
             model,
             system_prompt,
