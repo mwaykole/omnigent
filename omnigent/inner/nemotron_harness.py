@@ -18,7 +18,6 @@ Env vars read at startup:
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from fastapi import FastAPI
 
@@ -31,50 +30,56 @@ _ENV_BASE_URL = "HARNESS_NEMOTRON_BASE_URL"
 _DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _DEFAULT_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
-# NVIDIA Nemotron models stream reasoning_content instead of content
-# by default. Disable thinking so the SDK receives standard content deltas.
-_NVIDIA_EXTRA_BODY = {"chat_template_kwargs": {"enable_thinking": False}}
+_NEMOTRON_CODING_PROMPT = """\
+You are a skilled coding assistant with access to tools. Use them \
+proactively to accomplish tasks.
 
+## Tool Usage
 
-class _NvidiaCompletions:
-    """Injects ``chat_template_kwargs`` into every chat completions call."""
+- **Reading files:** Use the available file-reading tools to examine \
+code before making changes. Always read a file before editing it.
+- **Editing files:** Use file-editing tools to make precise changes. \
+Prefer small, targeted edits over full rewrites.
+- **Shell/terminal:** Use shell tools to run commands — build, test, \
+lint, git operations, etc. Check command output for errors.
 
-    def __init__(self, completions: Any) -> None:
-        self._completions = completions
+## Coding Workflow
 
-    async def create(self, **kwargs: Any) -> Any:
-        extra = kwargs.pop("extra_body", None) or {}
-        kwargs["extra_body"] = {**_NVIDIA_EXTRA_BODY, **extra}
-        return await self._completions.create(**kwargs)
+1. **Understand first** — Read relevant files and understand the \
+existing code before changing it.
+2. **Make targeted changes** — Edit only what needs to change. Don't \
+refactor unrelated code.
+3. **Verify your work** — After editing, run tests or build commands \
+to confirm your changes work.
+4. **Report results** — Tell the user what you changed and how to \
+verify it.
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._completions, name)
+## Safety
 
+- Never delete files without confirming with the user.
+- Don't overwrite files without reading them first.
+- Check for errors in command output before proceeding.
+- If a task is unclear, ask for clarification rather than guessing.
 
-class _NvidiaChat:
-    """Wraps ``AsyncOpenAI.chat`` to inject NVIDIA-specific params."""
+## Response Style
 
-    def __init__(self, chat: Any) -> None:
-        self._chat = chat
-        self.completions = _NvidiaCompletions(chat.completions)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._chat, name)
+- Be concise. Show what changed and what to do next.
+- When showing code changes, include the file path.
+- If a command fails, diagnose the error and suggest a fix.\
+"""
 
 
 def _build_nemotron_executor() -> Executor:
     model = os.environ.get(_ENV_MODEL) or _DEFAULT_MODEL
     base_url = os.environ.get(_ENV_BASE_URL) or _DEFAULT_BASE_URL
     api_key = os.environ.get("NVIDIA_API_KEY") or ""
-    executor = OpenAIAgentsSDKExecutor(
+    return OpenAIAgentsSDKExecutor(
         model=model,
         base_url_override=base_url,
         api_key=api_key,
         use_responses=False,
+        system_prompt_prefix=_NEMOTRON_CODING_PROMPT,
     )
-    # Patch the client to inject NVIDIA-specific body params on every call.
-    object.__setattr__(executor._client, "chat", _NvidiaChat(executor._client.chat))
-    return executor
 
 
 def create_app() -> FastAPI:
