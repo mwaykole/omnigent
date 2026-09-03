@@ -5,6 +5,7 @@ import type { ProjectCost, SessionUsage } from "@/lib/usageApi";
 interface Props {
   sessions: SessionUsage[];
   projects?: ProjectCost[];
+  animate?: boolean;
 }
 
 function aggregateByKey(
@@ -51,7 +52,13 @@ function BreakdownTooltip({
   );
 }
 
-function HorizontalBarChart({ data }: { data: { name: string; cost: number }[] }) {
+function HorizontalBarChart({
+  data,
+  animate,
+}: {
+  data: { name: string; cost: number }[];
+  animate: boolean;
+}) {
   if (data.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
@@ -85,14 +92,19 @@ function HorizontalBarChart({ data }: { data: { name: string; cost: number }[] }
             content={<BreakdownTooltip />}
             cursor={{ fill: "var(--accent)", opacity: 0.3 }}
           />
-          <Bar dataKey="cost" fill="var(--primary)" radius={[0, 3, 3, 0]} />
+          <Bar
+            dataKey="cost"
+            fill="var(--primary)"
+            radius={[0, 3, 3, 0]}
+            isAnimationActive={animate}
+          />
         </BarChart>
       </ResponsiveContainer>
     </div>
   );
 }
 
-export function UsageBreakdownCharts({ sessions, projects }: Props) {
+export function UsageBreakdownCharts({ sessions, projects, animate = true }: Props) {
   const byHarness = aggregateByKey(sessions, (s) => s.harness);
   const byModel = aggregateByModel(sessions);
   const byProject = (projects ?? []).map((p) => ({
@@ -104,15 +116,15 @@ export function UsageBreakdownCharts({ sessions, projects }: Props) {
     <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
       <div>
         <h3 className="mb-2 text-sm font-medium text-muted-foreground">Cost by harness</h3>
-        <HorizontalBarChart data={byHarness} />
+        <HorizontalBarChart data={byHarness} animate={animate} />
       </div>
       <div>
         <h3 className="mb-2 text-sm font-medium text-muted-foreground">Cost by model</h3>
-        <HorizontalBarChart data={byModel} />
+        <HorizontalBarChart data={byModel} animate={animate} />
       </div>
       <div>
         <h3 className="mb-2 text-sm font-medium text-muted-foreground">Cost by project</h3>
-        <HorizontalBarChart data={byProject} />
+        <HorizontalBarChart data={byProject} animate={animate} />
       </div>
     </div>
   );

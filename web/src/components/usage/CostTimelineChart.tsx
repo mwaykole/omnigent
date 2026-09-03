@@ -5,10 +5,13 @@ import type { DailyCost } from "@/lib/usageApi";
 interface Props {
   dailyCosts: DailyCost[];
   forecastCosts?: DailyCost[];
+  now?: Date;
+  animate?: boolean;
 }
 
 function fillGaps(
   costs: DailyCost[],
+  now: Date,
   forecastCosts?: DailyCost[],
 ): { label: string; cost: number; isForecast: boolean }[] {
   if (costs.length === 0 && (!forecastCosts || forecastCosts.length === 0)) return [];
@@ -22,7 +25,7 @@ function fillGaps(
   allDays.sort();
   const start = new Date(allDays[0] + "T00:00:00Z");
   const end = new Date(allDays[allDays.length - 1] + "T00:00:00Z");
-  const today = new Date();
+  const today = new Date(now);
   today.setUTCHours(0, 0, 0, 0);
   const last = end > today ? end : today;
 
@@ -70,8 +73,8 @@ function CustomTooltip({
   );
 }
 
-export function CostTimelineChart({ dailyCosts, forecastCosts }: Props) {
-  const data = fillGaps(dailyCosts, forecastCosts);
+export function CostTimelineChart({ dailyCosts, forecastCosts, now, animate = true }: Props) {
+  const data = fillGaps(dailyCosts, now ?? new Date(), forecastCosts);
   if (data.length === 0) {
     return (
       <div className="flex h-48 items-center justify-center text-sm text-muted-foreground">
@@ -100,7 +103,7 @@ export function CostTimelineChart({ dailyCosts, forecastCosts }: Props) {
             className="fill-muted-foreground"
           />
           <Tooltip content={<CustomTooltip />} cursor={{ fill: "var(--accent)", opacity: 0.3 }} />
-          <Bar dataKey="cost" radius={[3, 3, 0, 0]}>
+          <Bar dataKey="cost" radius={[3, 3, 0, 0]} isAnimationActive={animate}>
             {data.map((entry) => (
               <Cell
                 key={entry.label}
