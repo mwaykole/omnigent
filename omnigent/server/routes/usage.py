@@ -11,6 +11,7 @@ from fastapi import APIRouter, Query, Request
 
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
+from omnigent.errors import restart_on_stale_cursor
 from omnigent.runtime.policies.builder import load_session_tree, load_session_usage
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
@@ -175,6 +176,7 @@ def _forecast_cost(
 # ── Report builder ───────────────────────────────────────────────
 
 
+@restart_on_stale_cursor
 def _build_usage_report(
     conversation_store: ConversationStore,
     user_id: str | None,
@@ -243,11 +245,15 @@ def _build_usage_report(
             if until and conv.updated_at > until_epoch:
                 continue
 
-            usage = load_session_usage(conv.id, conversation_store)
+            usage = load_session_usage(
+                conv.id,
+                conversation_store,
+                root_conversation_id=conv.root_conversation_id,
+            )
             primary_harness = _resolve_session_harness(conv) if include_page_details else None
             other_harnesses = None
             if include_page_details:
-                tree = load_session_tree(conv.id, conversation_store)
+                tree = load_session_tree(conv.id, conversation_store, conv.root_conversation_id)
                 other_harnesses = _collect_other_harnesses(primary_harness, tree, conv.id)
 
             session_cost = _session_cost(usage)

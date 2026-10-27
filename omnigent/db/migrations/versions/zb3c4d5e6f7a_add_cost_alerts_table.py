@@ -1,7 +1,7 @@
 """Add cost_alerts table.
 
 Revision ID: zb3c4d5e6f7a
-Revises: e5d9bc8ac650
+Revises: gh1b2c3d4e5f
 Create Date: 2026-08-21 00:00:00.000000
 
 Adds a ``cost_alerts`` table for per-user spending thresholds. Each alert
@@ -21,7 +21,7 @@ from alembic import op
 from omnigent.db.db_models import Uuid16
 
 revision: str = "zb3c4d5e6f7a"
-down_revision: str | None = "ga1b2c3d4e5f"
+down_revision: str | None = "gh1b2c3d4e5f"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
