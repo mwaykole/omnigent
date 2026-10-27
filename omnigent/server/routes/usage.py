@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Query, Request
@@ -12,7 +12,7 @@ from fastapi import APIRouter, Query, Request
 from omnigent._wrapper_labels import WRAPPER_LABEL_KEY
 from omnigent.entities import Conversation
 from omnigent.errors import restart_on_stale_cursor
-from omnigent.runtime.policies.builder import load_session_tree, load_session_usage
+from omnigent.runtime.policies.builder import load_session_usage_and_tree
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.feature_flags import Feature, FeatureFlags, resolve_feature_flags
 from omnigent.server.routes._auth_helpers import require_user
@@ -40,12 +40,12 @@ def _utc_today() -> str:
     """Return the current UTC calendar day as ``"YYYY-MM-DD"``."""
     from omnigent.db.utils import now_epoch
 
-    return datetime.fromtimestamp(now_epoch(), tz=timezone.utc).date().isoformat()
+    return datetime.fromtimestamp(now_epoch(), tz=UTC).date().isoformat()
 
 
 def _day_offset(day_utc: str, *, days: int) -> str:
     """Return the UTC day *days* before *day_utc*, as ``"YYYY-MM-DD"``."""
-    base = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    base = datetime.strptime(day_utc, "%Y-%m-%d").replace(tzinfo=UTC)
     return (base - timedelta(days=days)).date().isoformat()
 
 
@@ -145,7 +145,7 @@ def _forecast_cost(
     today = _utc_today()
     projected_daily: list[DailyCost] = []
     projected_total = 0.0
-    base = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    base = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=UTC)
 
     for i in range(1, days_ahead + 1):
         day = (base + timedelta(days=i)).date().isoformat()
@@ -189,9 +189,22 @@ def _build_usage_report(
     """
     Build the usage report: a daily-rollup cost summary plus session detail.
 
-    The summary (today / last 7 days / last 30 days / all-time) is always
-    unfiltered. The per-session detail and daily timeline respect the optional
-    ``since``/``until`` date range when provided.
+    A session deleted while the detail enumeration is paging invalidates the
+    page cursor; the whole report is rebuilt (via
+    :func:`restart_on_stale_cursor`) so the detail list is never silently
+    truncated.
+
+    The summary (today / last 7 days / last 30 days / all-time) is summed
+    from the per-user daily-cost rollup (``user_daily_cost``), which
+    attributes spend to the UTC day it occurred on — so the windows reflect
+    when spend actually happened, not merely a session's last-activity time.
+
+    The per-session detail is a separate view over each top-level session's
+    cumulative ``session_usage`` (rolled up across its sub-agent subtree via
+    :func:`load_session_usage_and_tree`), newest activity first, carrying the
+    authoritative session cost and the per-model breakdown. The detail and
+    daily timeline respect the optional ``since``/``until`` date range when
+    provided.
     """
     rollup_user = user_id if user_id is not None else RESERVED_USER_LOCAL
 
@@ -205,10 +218,10 @@ def _build_usage_report(
     since_epoch: float = 0
     until_epoch: float = float("inf")
     if since:
-        since_epoch = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+        since_epoch = datetime.strptime(since, "%Y-%m-%d").replace(tzinfo=UTC).timestamp()
     if until:
         until_epoch = (
-            datetime.strptime(until, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            datetime.strptime(until, "%Y-%m-%d").replace(tzinfo=UTC)
             + timedelta(days=1)
             - timedelta(seconds=1)
         ).timestamp()
@@ -245,17 +258,22 @@ def _build_usage_report(
             if until and conv.updated_at > until_epoch:
                 continue
 
-            usage = load_session_usage(
+            # The list page already holds each row, so pass its root to skip
+            # re-reading the same conversation once per listed session. Sums and
+            # rows come from ONE tree load: the harness roll-up below needs the
+            # same tree the sums came from, and loading it again doubled the tree
+            # pages read for every listed session.
+            usage, tree = load_session_usage_and_tree(
                 conv.id,
                 conversation_store,
                 root_conversation_id=conv.root_conversation_id,
             )
             primary_harness = _resolve_session_harness(conv) if include_page_details else None
-            other_harnesses = None
-            if include_page_details:
-                tree = load_session_tree(conv.id, conversation_store, conv.root_conversation_id)
-                other_harnesses = _collect_other_harnesses(primary_harness, tree, conv.id)
-
+            other_harnesses = (
+                _collect_other_harnesses(primary_harness, tree, conv.id)
+                if include_page_details
+                else None
+            )
             session_cost = _session_cost(usage)
             proj_id = conv.project_id
             proj_name = project_names.get(proj_id) if proj_id else None

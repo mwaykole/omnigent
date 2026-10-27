@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import logging
 import re
 import subprocess
 import sys
+import threading
 import types
 import uuid
 from collections.abc import Sequence
@@ -234,6 +236,52 @@ def test_parse_reaper_rejects_per_provider_override() -> None:
                     {"provider": "modal", "reaper": {"enabled": True}},
                     {"provider": "e2b"},
                 ],
+            }
+        )
+
+
+def test_parse_shutdown_drain_defaults_to_no_wait() -> None:
+    """A single replica has nowhere for an in-flight launch to bind, so shutdown doesn't wait."""
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    assert config is not None
+    assert config.shutdown_drain_s == 0.0
+
+
+@pytest.mark.parametrize("providers", [False, True])
+def test_parse_shutdown_drain_is_deployment_wide(providers: bool) -> None:
+    raw: dict[str, object] = {"server_url": "https://s.example.com", "shutdown_drain_s": 240}
+    if providers:
+        raw["providers"] = [{"provider": "modal"}, {"provider": "e2b"}]
+    else:
+        raw["provider"] = "modal"
+    config = parse_sandbox_config(raw)
+    assert config is not None
+    assert config.shutdown_drain_s == 240.0
+
+
+@pytest.mark.parametrize("value", [-1, True, "240s", float("inf"), float("nan"), 10**400])
+def test_parse_shutdown_drain_rejects_malformed_value(value: object) -> None:
+    with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
+        parse_sandbox_config(
+            {"provider": "modal", "server_url": "https://s.example.com", "shutdown_drain_s": value}
+        )
+
+
+@pytest.mark.parametrize("value", [-1.0, float("inf"), float("nan")])
+def test_directly_built_deployment_rejects_malformed_shutdown_drain(value: float) -> None:
+    """Embedders build the deployment in code, so it validates the drain itself."""
+    config = parse_sandbox_config({"provider": "modal", "server_url": "https://s.example.com"})
+    assert config is not None
+    with pytest.raises(ValueError, match=r"shutdown_drain_s.*non-negative"):
+        ManagedSandboxDeployment(configs=config.configs, shutdown_drain_s=value)
+
+
+def test_parse_shutdown_drain_rejects_per_provider_override() -> None:
+    with pytest.raises(ValueError, match="deployment-wide"):
+        parse_sandbox_config(
+            {
+                "server_url": "https://s.example.com",
+                "providers": [{"provider": "modal", "shutdown_drain_s": 240}],
             }
         )
 
@@ -711,6 +759,8 @@ def test_parse_valid_openshell_config_builds_parameterized_factory(
                 "env": ["OPENAI_API_KEY", "GIT_TOKEN"],
                 "cluster": "my-gateway",
                 "workspace": "team-alpha",
+                "node_selector": {"kata-install": "true"},
+                "runtime_class": "kata-containers",
             },
         }
     )
@@ -727,6 +777,8 @@ def test_parse_valid_openshell_config_builds_parameterized_factory(
     assert fake.env == ["OPENAI_API_KEY", "GIT_TOKEN"]
     assert fake.cluster == "my-gateway"
     assert fake.workspace == "team-alpha"
+    assert fake.node_selector == {"kata-install": "true"}
+    assert fake.runtime_class == "kata-containers"
 
 
 def test_parse_openshell_without_section_defaults(
@@ -2169,6 +2221,92 @@ def test_provider_ui_capabilities_reports_multi_repo_per_provider() -> None:
     }
 
 
+def test_provider_ui_capabilities_enable_inference_only_on_configured_target() -> None:
+    launcher = FakeSandboxLauncher()
+    profile = {
+        "providers": {"gateway": {"kind": "gateway"}},
+        "inference": {"harnesses": {"pi-native": {"provider": "gateway"}}},
+    }
+    deployment = ManagedSandboxDeployment(
+        configs=tuple(
+            ManagedSandboxConfig(
+                server_url="https://s",
+                provider=provider,
+                token_ttl_s=3600,
+                launcher_factory=lambda: launcher,
+                host_config=config,
+            )
+            for provider, config in (
+                ("kubernetes", None),
+                ("modal", {"inference": {"harnesses": {}}}),
+                ("agent_sandbox", profile),
+            )
+        )
+    )
+    assert deployment.provider_ui_capabilities() == {
+        "kubernetes": {"multi_repo": False},
+        "modal": {"multi_repo": False},
+        "agent_sandbox": {"multi_repo": False, "inference_models": True},
+    }
+
+
+def test_provider_ui_capabilities_advertise_default_models_for_unbound_discovery() -> None:
+    launcher = FakeSandboxLauncher()
+    gateway = {
+        "providers": {
+            "gateway": {
+                "kind": "gateway",
+                "openai": {
+                    "base_url": "https://gateway.example/v1",
+                    "api_key_ref": "env:POD_KEY",
+                    "wire_api": "responses",
+                },
+            }
+        }
+    }
+    discovery = {"gateway": {"base_url": "https://catalog.example/v1", "api_key_ref": "env:KEY"}}
+    bound = {**gateway, "inference": {"harnesses": {"codex-native": {"provider": "gateway"}}}}
+
+    async def hook(harness: str, user_id: str | None) -> list[dict[str, Any]]:
+        return []
+
+    def config(provider: str, **fields: Any) -> ManagedSandboxConfig:
+        return ManagedSandboxConfig(
+            server_url="https://s",
+            provider=provider,
+            token_ttl_s=3600,
+            launcher_factory=lambda: launcher,
+            **fields,
+        )
+
+    deployment = ManagedSandboxDeployment(
+        configs=(
+            config("hooked", default_model_options=hook),
+            config("discovered", host_config=gateway, model_discovery=discovery),
+            config("static", host_config=gateway),
+            config("bound", host_config=bound, model_discovery=discovery),
+            config(
+                "malformed",
+                host_config={"providers": {"gateway": "nope"}},
+                model_discovery=discovery,
+            ),
+            config(
+                "malformed-inference",
+                host_config={**gateway, "inference": "nope"},
+                model_discovery=discovery,
+            ),
+        )
+    )
+    assert deployment.provider_ui_capabilities() == {
+        "hooked": {"multi_repo": False, "default_models": True},
+        "discovered": {"multi_repo": False, "default_models": True},
+        "static": {"multi_repo": False},
+        "bound": {"multi_repo": False, "inference_models": True},
+        "malformed": {"multi_repo": False},
+        "malformed-inference": {"multi_repo": False},
+    }
+
+
 # ── GET /v1/info: managed_sandboxes_enabled ─────────────────
 
 
@@ -2319,10 +2457,14 @@ async def test_info_reports_enabled_for_injected_custom_launcher(
 # ── launch_managed_host ─────────────────────────────────────
 
 
-async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) -> None:
+@pytest.mark.parametrize("requested_host_id", [None, "0123456789abcdef0123456789abcdef"])
+async def test_launch_success_registers_host_and_returns_workspace(
+    db_uri: str, requested_host_id: str | None
+) -> None:
     """
     Golden path: provision → pre-register the host row with its token
-    → start host → host online.
+    → start host → host online. A requested id is the one the host starts
+    under, and only then does the host route by it.
 
     The launcher arrives through the config's factory seam (no
     patching), and the fake's ``on_host_start`` connects exactly as
@@ -2346,9 +2488,17 @@ async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) 
         config=_injected_config(fake),
         owner=_OWNER,
         host_store=host_store,
+        host_id=requested_host_id,
     )
 
     assert fake.prepared is True
+    # Only a requested id needs the host to key off its default here.
+    config_writes = [cmd for cmd in fake.commands if cmd.startswith("python3 -c")]
+    if requested_host_id is None:
+        assert config_writes == []
+    else:
+        slice_key = {"host": {"slice_key_enabled": True}}
+        assert config_writes == [render_host_config_write_command(slice_key)]
     # The workspace was created in the sandbox's home and returned.
     assert result.workspace == "/root/workspace"
     assert any("mkdir -p /root/workspace" in cmd for cmd in fake.commands)
@@ -2356,6 +2506,9 @@ async def test_launch_success_registers_host_and_returns_workspace(db_uri: str) 
     start = fake.host_starts[0]
     assert "--server https://srv.example.com" in start.command
     assert result.host_id == start.host_id
+    assert start.host_name == f"managed-{start.host_id[:8]}"
+    if requested_host_id is not None:
+        assert start.host_id == requested_host_id
     # The hosts row carries the managed binding with full content; the
     # provider comes from the LAUNCHER (not config), so injected custom
     # launchers record their own name.
@@ -2484,7 +2637,9 @@ async def test_resume_rematerializes_host_config_before_host_restart(db_uri: str
     Waking a dormant sandbox re-runs the config write before re-execing the
     host — resume_managed_host bypasses _register_and_start_host, so this is a
     distinct wiring point, and re-materializing is what lets an operator's
-    host_config change land on the next wake without a new sandbox.
+    host_config change land on the next wake without a new sandbox. The wake
+    also re-materializes the host's keying, which the caller derives from the
+    session.
     """
     host_store = HostStore(db_uri)
 
@@ -2503,15 +2658,28 @@ async def test_resume_rematerializes_host_config_before_host_restart(db_uri: str
     host_store.set_offline(result.host_id)
     commands_before = len(fake.commands)
 
-    await resume_managed_host(result.host_id, host_store, config)
+    await resume_managed_host(result.host_id, host_store, config, slice_key_enabled=True)
 
     assert fake.resumed == ["sb-fake-1"]
     resumed_commands = fake.commands[commands_before:]
-    write_index = resumed_commands.index(render_host_config_write_command(host_config))
+    write_index = resumed_commands.index(
+        render_host_config_write_command({**host_config, "host": {"slice_key_enabled": True}})
+    )
     host_index = next(
         i for i, cmd in enumerate(resumed_commands) if "omnigent host --server" in cmd
     )
     assert write_index < host_index
+
+
+def test_host_slice_key_enabled_only_for_the_requested_host() -> None:
+    """Relaunch and wake key only the host the create named, so a later host can't inherit it."""
+    from omnigent.server.managed_hosts import host_slice_key_enabled
+
+    requested = {"omnigent.sandbox.requested_host_id": "0123456789abcdef0123456789abcdef"}
+
+    assert host_slice_key_enabled(requested, "0123456789abcdef0123456789abcdef") is True
+    assert host_slice_key_enabled(requested, "fedcba9876543210fedcba9876543210") is False
+    assert host_slice_key_enabled({}, "0123456789abcdef0123456789abcdef") is False
 
 
 async def test_launch_without_host_config_writes_no_config(db_uri: str) -> None:
@@ -3024,7 +3192,13 @@ async def test_relaunch_rolls_sandbox_generation_under_same_host(db_uri: str) ->
     assert gen1 is not None
     gen1_token = fake.host_starts[0].token
 
-    relaunched = await relaunch_managed_host(config=config, host=gen1, host_store=host_store)
+    commands_before = len(fake.commands)
+    relaunched = await relaunch_managed_host(
+        config=config, host=gen1, host_store=host_store, slice_key_enabled=True
+    )
+    # The relaunch applies the keying its caller derived from the session.
+    slice_key = render_host_config_write_command({"host": {"slice_key_enabled": True}})
+    assert slice_key in fake.commands[commands_before:]
 
     # Same identity, new generation: the session's host binding (which
     # references host_id) survives the roll.
@@ -3460,6 +3634,7 @@ async def test_run_managed_wake_forwards_recorded_repo(
 
     monkeypatch.setattr("omnigent.server.managed_hosts.resume_managed_host", _resume)
     conv = SimpleNamespace(
+        inference_snapshot=None,
         labels={MANAGED_REPO_LABEL_KEY: raw_repo} if raw_repo is not None else {},
         host_id="host_1",
     )
@@ -3468,7 +3643,7 @@ async def test_run_managed_wake_forwards_recorded_repo(
     await orchestration._run_managed_wake(
         session_id="conv_1",
         conv=conv,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=SimpleNamespace(get_conversation=lambda _sid: conv),
         host_store=SimpleNamespace(),
@@ -3935,6 +4110,108 @@ async def test_terminate_managed_host_terminates_and_deletes_row(db_uri: str) ->
     assert (
         host_store.resolve_launch_token("62a91eb065624754c6a6dfb5869dd7e8", "tok-term-1") is None
     )
+
+
+class _LogCapturingFakeLauncher(FakeSandboxLauncher):
+    """Fake launcher that records log captures in order with terminates."""
+
+    def __init__(
+        self,
+        *,
+        capture_error: Exception | None = None,
+        capture_blocks: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self.events: list[tuple[str, str]] = []
+        self._capture_error = capture_error
+        self._capture_blocks = capture_blocks
+
+    def capture_logs(self, sandbox_id: str) -> str | None:
+        self.events.append(("capture", sandbox_id))
+        if self._capture_blocks is not None:
+            self._capture_blocks.wait()
+        if self._capture_error is not None:
+            raise self._capture_error
+        return "## /tmp/omnigent-host.log\nhost exiting (fatal_connect)"
+
+    def terminate(self, sandbox_id: str) -> None:
+        self.events.append(("terminate", sandbox_id))
+        super().terminate(sandbox_id)
+
+
+def _register_capture_host(host_store: HostStore, host_id: str) -> Host:
+    return host_store.register_managed_host(
+        host_id=host_id,
+        name="managed-capture",
+        user_id=_OWNER,
+        token="tok-capture",
+        provider="modal",
+        sandbox_id="sb-capture",
+        token_expires_at=now_epoch() + 3600,
+    )
+
+
+async def test_terminate_managed_host_capture_logs_logs_before_terminating(
+    db_uri: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An opted-in teardown logs the sandbox's log tails, then terminates it."""
+    fake = _LogCapturingFakeLauncher()
+    host_store = HostStore(db_uri)
+    host = _register_capture_host(host_store, "0f7c1e9a2b3d4c5e8f9a0b1c2d3e4f5a")
+
+    with caplog.at_level(logging.ERROR, logger="omnigent.server.managed_hosts"):
+        await terminate_managed_host(host, host_store, _injected_config(fake), capture_logs=True)
+
+    assert fake.events == [("capture", "sb-capture"), ("terminate", "sb-capture")]
+    assert "Managed sandbox sb-capture logs before teardown" in caplog.text
+    assert "host exiting (fatal_connect)" in caplog.text
+    assert host_store.get_host(host.host_id) is None
+
+
+async def test_terminate_managed_host_skips_log_capture_by_default(db_uri: str) -> None:
+    """Teardown without ``capture_logs`` never reads the sandbox's logs."""
+    fake = _LogCapturingFakeLauncher()
+    host_store = HostStore(db_uri)
+    host = _register_capture_host(host_store, "1a2b3c4d5e6f40718293a4b5c6d7e8f9")
+
+    await terminate_managed_host(host, host_store, _injected_config(fake))
+
+    assert fake.events == [("terminate", "sb-capture")]
+
+
+async def test_terminate_managed_host_terminates_when_log_capture_fails(db_uri: str) -> None:
+    """A failed log read is only diagnostics; the sandbox is still terminated."""
+    fake = _LogCapturingFakeLauncher(capture_error=click.ClickException("exec failed"))
+    host_store = HostStore(db_uri)
+    host = _register_capture_host(host_store, "2b3c4d5e6f7a48129304b5c6d7e8f9a0")
+
+    await terminate_managed_host(host, host_store, _injected_config(fake), capture_logs=True)
+
+    assert fake.events == [("capture", "sb-capture"), ("terminate", "sb-capture")]
+    assert host_store.get_host(host.host_id) is None
+
+
+async def test_terminate_managed_host_terminates_when_log_capture_hangs(
+    db_uri: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A capture that never returns times out and the sandbox is still terminated."""
+    monkeypatch.setattr("omnigent.server.managed_hosts.SANDBOX_LOG_CAPTURE_TIMEOUT_S", 0.05)
+    release = threading.Event()
+    fake = _LogCapturingFakeLauncher(capture_blocks=release)
+    host_store = HostStore(db_uri)
+    host = _register_capture_host(host_store, "4d5e6f7a8b9c40d1a2b3c4d5e6f7a8b9")
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="omnigent.server.managed_hosts"):
+            await terminate_managed_host(
+                host, host_store, _injected_config(fake), capture_logs=True
+            )
+    finally:
+        release.set()
+
+    assert fake.events == [("capture", "sb-capture"), ("terminate", "sb-capture")]
+    assert "Timed out after 0.05s capturing logs from managed sandbox sb-capture" in caplog.text
+    assert host_store.get_host(host.host_id) is None
 
 
 async def test_terminate_managed_host_cleans_active_and_pending_generations(db_uri: str) -> None:
@@ -4496,6 +4773,71 @@ async def test_launch_defaults_to_first_provider(db_uri: str) -> None:
     assert host.sandbox_provider == "alpha"
 
 
+@pytest.mark.parametrize(
+    ("server_url", "host_config", "enabled", "expected"),
+    [
+        ("https://srv.example.com", None, False, None),
+        ("https://srv.example.com", None, True, {"host": {"slice_key_enabled": True}}),
+        ("https://ws.example.com/api/2.0/omnigent", None, True, None),
+        (
+            "https://ws.example.com/api/2.0/omnigent",
+            None,
+            False,
+            {"host": {"slice_key_enabled": False}},
+        ),
+        # An explicit deployment value that contradicts the launch is overwritten,
+        # whichever way the URL's default points.
+        (
+            "https://ws.example.com/api/2.0/omnigent",
+            {"host": {"slice_key_enabled": False}},
+            True,
+            {"host": {"slice_key_enabled": True}},
+        ),
+        (
+            "https://srv.example.com",
+            {"host": {"slice_key_enabled": True}},
+            False,
+            {"host": {"slice_key_enabled": False}},
+        ),
+        # One that already agrees with the launch is passed through unchanged.
+        (
+            "https://srv.example.com",
+            {"host": {"slice_key_enabled": True}},
+            True,
+            {"host": {"slice_key_enabled": True}},
+        ),
+    ],
+)
+def test_host_slice_key_is_injected_only_to_override_the_hosts_default(
+    server_url: str,
+    host_config: dict[str, object] | None,
+    enabled: bool,
+    expected: dict[str, object] | None,
+) -> None:
+    """
+    A host keys by default only on the workspace mount, so a launch adds the
+    setting only to change what the host would otherwise do, leaving legacy
+    launchers an unchanged call; an explicit deployment value never wins over
+    the launch's decision.
+    """
+    from omnigent.server.managed_hosts import _with_host_slice_key
+
+    assert _with_host_slice_key(host_config, enabled, server_url) == expected
+
+
+def test_host_slice_key_keeps_the_deployments_host_section() -> None:
+    """The setting joins an operator's ``host`` section without mutating it."""
+    from omnigent.server.managed_hosts import _with_host_slice_key
+
+    config = {"host": {"name": "kept"}, "runner": {"idle_timeout_s": 60}}
+
+    assert _with_host_slice_key(config, True, "https://srv.example.com") == {
+        "host": {"name": "kept", "slice_key_enabled": True},
+        "runner": {"idle_timeout_s": 60},
+    }
+    assert config["host"] == {"name": "kept"}
+
+
 async def test_launch_unknown_provider_rejects_before_provisioning(db_uri: str) -> None:
     """
     An unoffered provider is a 400 naming the available ones, with
@@ -4708,8 +5050,8 @@ async def test_kick_managed_relaunch_defers_the_classifier_to_the_launch_task(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
-        sandbox_config=SimpleNamespace(),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4760,8 +5102,8 @@ async def test_relaunch_claim_and_launch_task_are_one_synchronous_step(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
-        sandbox_config=SimpleNamespace(),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4793,8 +5135,8 @@ async def test_kick_managed_relaunch_without_agent_store_threads_none(
     orchestration._kick_managed_relaunch(
         session_id="conv_1",
         conv=conv,
-        host=SimpleNamespace(user_id=_OWNER),
-        sandbox_config=SimpleNamespace(),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="modal"),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4833,10 +5175,10 @@ async def test_run_managed_launch_leaves_the_runner_unclassified(
     await orchestration._run_managed_launch(
         session_id="conv_1",
         owner=_OWNER,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         repos=[],
         tracker=ManagedLaunchTracker(),
-        conversation_store=SimpleNamespace(),
+        conversation_store=SimpleNamespace(get_conversation=lambda _sid: None),
         host_store=SimpleNamespace(),
         host_registry=None,
         tunnel_registry=None,
@@ -4876,10 +5218,10 @@ async def test_run_managed_launch_resolves_the_classifier_on_its_own_task(
     await orchestration._run_managed_launch(
         session_id="conv_1",
         owner=_OWNER,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         repos=[],
         tracker=ManagedLaunchTracker(),
-        conversation_store=SimpleNamespace(),
+        conversation_store=SimpleNamespace(get_conversation=lambda _sid: None),
         host_store=SimpleNamespace(),
         host_registry=None,
         tunnel_registry=None,
@@ -4915,10 +5257,10 @@ async def test_run_managed_launch_omits_the_classifier_for_a_session_scoped_impo
     await orchestration._run_managed_launch(
         session_id="conv_1",
         owner=_OWNER,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         repos=[],
         tracker=ManagedLaunchTracker(),
-        conversation_store=SimpleNamespace(),
+        conversation_store=SimpleNamespace(get_conversation=lambda _sid: None),
         host_store=SimpleNamespace(),
         host_registry=None,
         tunnel_registry=None,
@@ -4967,7 +5309,7 @@ async def test_kick_managed_wake_defers_the_classifier_to_the_wake_task(
     orchestration._kick_managed_wake_impl(
         session_id="conv_1",
         conv=conv,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(),
         host_store=SimpleNamespace(),
@@ -4979,6 +5321,84 @@ async def test_kick_managed_wake_defers_the_classifier_to_the_wake_task(
     assert reads == [], "the kick must not read the agent store; the wake task does"
     assert captured["agent_store"] is store
     assert captured["agent_id"] == builtin.id
+
+
+async def test_relaunch_and_wake_seed_the_launch_status_with_the_host_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A relaunch and a wake seed ``provisioning`` with the host's provider, so the
+    launch's stage rows name it even on a replica that never cached the launch.
+    """
+    from omnigent.server.routes._sessions import orchestration
+
+    async def _noop(**kwargs: object) -> None:
+        return None
+
+    published: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(orchestration, "_run_managed_launch", _noop)
+    monkeypatch.setattr(orchestration, "_run_managed_wake", _noop)
+    monkeypatch.setattr(
+        orchestration,
+        "_publish_sandbox_status",
+        lambda session_id, stage, error=None, *, provider=None: published.append(
+            (session_id, stage, provider)
+        ),
+    )
+    shared = {
+        "sandbox_config": SimpleNamespace(configs=()),
+        "conversation_store": SimpleNamespace(),
+        "host_store": SimpleNamespace(),
+        "app_state": SimpleNamespace(agent_store=_StubAgentStore()),
+    }
+    before = set(orchestration._managed_launch_tasks)
+    orchestration._kick_managed_relaunch(
+        session_id="conv_relaunch",
+        conv=SimpleNamespace(labels={}, host_id="host_1", agent_id=None),
+        host=SimpleNamespace(user_id=_OWNER, sandbox_provider="arclet"),
+        tracker=ManagedLaunchTracker(),
+        **shared,
+    )
+    orchestration._kick_managed_wake_impl(
+        session_id="conv_wake",
+        conv=SimpleNamespace(labels={}, host_id="host_2", agent_id=None),
+        tracker=ManagedLaunchTracker(),
+        provider="arclet",
+        **shared,
+    )
+    await asyncio.gather(*(set(orchestration._managed_launch_tasks) - before))
+    assert published == [
+        ("conv_relaunch", "provisioning", "arclet"),
+        ("conv_wake", "provisioning", "arclet"),
+    ]
+
+
+def test_launch_stage_rows_name_the_provider(caplog: pytest.LogCaptureFixture) -> None:
+    """
+    Each launch-stage debug row names the provider, and later stages and a failure
+    keep the one the launch started with.
+    """
+    from omnigent.server.routes._sessions import helpers
+    from omnigent.server.routes._sessions.common import _session_sandbox_status_cache
+
+    session_id = "conv_provider_rows"
+    try:
+        with caplog.at_level(logging.INFO):
+            helpers._publish_sandbox_status_impl(session_id, "provisioning", provider="arclet")
+            helpers._publish_sandbox_status_impl(session_id, "starting")
+            helpers._publish_sandbox_status_impl(session_id, "failed", "host never connected")
+    finally:
+        _session_sandbox_status_cache.pop(session_id, None)
+    rows = [
+        (record.event_name, record.attributes)
+        for record in caplog.records
+        if getattr(record, "event_name", None) in {"sandbox_launch_stage", "sandbox_launch_failed"}
+    ]
+    assert rows == [
+        ("sandbox_launch_stage", {"stage": "provisioning", "provider": "arclet"}),
+        ("sandbox_launch_stage", {"stage": "starting", "provider": "arclet"}),
+        ("sandbox_launch_failed", {"stage": "starting", "provider": "arclet"}),
+    ]
 
 
 async def test_run_managed_wake_re_stamps_the_woken_runner(
@@ -5004,11 +5424,13 @@ async def test_run_managed_wake_re_stamps_the_woken_runner(
         bundle_location="bundle/loc",
         session_id=None,
     )
-    conv = SimpleNamespace(labels={}, host_id="host_1", agent_id=builtin.id)
+    conv = SimpleNamespace(
+        inference_snapshot=None, labels={}, host_id="host_1", agent_id=builtin.id
+    )
     await orchestration._run_managed_wake(
         session_id="conv_1",
         conv=conv,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(get_conversation=lambda _sid: None),
         host_store=SimpleNamespace(),
@@ -5044,11 +5466,13 @@ async def test_run_managed_wake_omits_the_classifier_for_a_session_scoped_impost
         bundle_location="bundle/loc",
         session_id="conv_1",
     )
-    conv = SimpleNamespace(labels={}, host_id="host_1", agent_id=impostor.id)
+    conv = SimpleNamespace(
+        inference_snapshot=None, labels={}, host_id="host_1", agent_id=impostor.id
+    )
     await orchestration._run_managed_wake(
         session_id="conv_1",
         conv=conv,
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=ManagedLaunchTracker(),
         conversation_store=SimpleNamespace(get_conversation=lambda _sid: None),
         host_store=SimpleNamespace(),
@@ -5087,11 +5511,12 @@ async def test_run_managed_wake_recreates_a_definitively_gone_sandbox(
     agent_store = _StubAgentStore({builtin.id: builtin})
     host = SimpleNamespace(host_id="host_1", user_id=_OWNER)
     host_store = SimpleNamespace(get_host=lambda _host_id: host)
-    sandbox_config = SimpleNamespace()
+    sandbox_config = SimpleNamespace(configs=())
     conversation_store = SimpleNamespace()
     host_registry = SimpleNamespace()
     tunnel_registry = SimpleNamespace()
     conv = SimpleNamespace(
+        inference_snapshot=None,
         labels={MANAGED_REPO_LABEL_KEY: "https://github.com/omnigent-ai/omnigent#main"},
         host_id=host.host_id,
         agent_id=builtin.id,
@@ -5170,7 +5595,7 @@ async def test_recreated_sandbox_records_and_publishes_workspace_reset_notice(
             host_id="host_1",
             workspace="/root/workspace/omnigent",
         ),
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         tracker=tracker,
         conversation_store=_ConversationStore(),
         host_store=SimpleNamespace(),
@@ -5258,7 +5683,7 @@ async def test_concurrent_relaunch_messages_kick_a_single_launch(
     )
     app_state = SimpleNamespace(
         host_store=SimpleNamespace(get_host=lambda _hid: dead_host, is_online=lambda _hid: False),
-        sandbox_config=SimpleNamespace(),
+        sandbox_config=SimpleNamespace(configs=()),
         managed_launches=tracker,
         agent_store=_StubAgentStore({builtin.id: builtin}),
         host_registry=None,
@@ -5554,3 +5979,86 @@ def test_agent_sandbox_reuses_the_kubernetes_config_block() -> None:
     # keep_alive is what the managed path needs from it, so it must not be the
     # raising capability default it inherits two levels up.
     assert type(launcher).keep_alive is not SandboxHostLauncher.keep_alive
+
+
+def test_keep_warm_sets_runner_idle_timeout() -> None:
+    """keep_warm_s maps onto runner.idle_timeout_s and is authoritative (wins over
+    an explicit value, preserves other runner keys); a no-op when unset."""
+    from omnigent.server.managed_hosts import _apply_keep_warm, _parse_keep_warm_s
+
+    assert _parse_keep_warm_s({"keep_warm_s": 30}) == 30
+    assert _parse_keep_warm_s({"keep_warm_s": 30.0}) == 30  # whole float ok
+    assert _parse_keep_warm_s({"keep_warm_s": 2592000}) == 2592000  # 30-day ceiling ok
+    # An oversized value must be rejected at config time: it becomes
+    # runner.idle_timeout_s, and the runner's float() would OverflowError on a
+    # value this large, stopping the runner from starting.
+    for bad in (0, 0.5, 2.9, -5, True, "x", float("nan"), float("inf"), 2592001, 10**400):
+        with pytest.raises(ValueError):
+            _parse_keep_warm_s({"keep_warm_s": bad})
+    assert _apply_keep_warm(None, 30) == {"runner": {"idle_timeout_s": 30}}
+    assert (
+        _apply_keep_warm({"runner": {"idle_timeout_s": 999}}, 30)["runner"]["idle_timeout_s"] == 30
+    )
+    assert _apply_keep_warm({"runner": {"foo": 1}}, 30)["runner"] == {
+        "foo": 1,
+        "idle_timeout_s": 30,
+    }
+    assert _parse_keep_warm_s({}) is None
+    assert _apply_keep_warm({"x": 1}, None) == {"x": 1}
+    with pytest.raises(ValueError):
+        _parse_keep_warm_s({"keep_warm_s": -5})
+
+
+@pytest.mark.parametrize("relaunch", [False, True])
+async def test_account_deleted_after_provision_terminates_unregistered_sandbox(db_uri, relaunch):
+    from omnigent.db.account_authority import account_authority_scope
+    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+
+    accounts = SqlAlchemyAccountStore(db_uri)
+    account = accounts.create_user_with_password(_OWNER, "test-password-hash")
+    hosts = HostStore(db_uri)
+
+    def connect(invocation):
+        hosts.upsert_on_connect(invocation.host_id, invocation.host_name, _OWNER)
+
+    fake = FakeSandboxLauncher(on_host_start=connect)
+    config = _injected_config(fake)
+    host = None
+    if relaunch:
+        first = await launch_managed_host(config=config, owner=_OWNER, host_store=hosts)
+        host = hosts.get_host(first.host_id)
+    provision = fake.provision
+    unregistered = []
+
+    def delete_after_provision(name):
+        sandbox_id = provision(name)
+        unregistered.append(sandbox_id)
+        assert accounts.delete_user(_OWNER) is True
+        return sandbox_id
+
+    fake.provision = delete_after_provision
+    with account_authority_scope(_OWNER, account.account_generation):
+        with pytest.raises(HTTPException) as error:
+            if relaunch:
+                await relaunch_managed_host(config=config, host=host, host_store=hosts)
+            else:
+                await launch_managed_host(config=config, owner=_OWNER, host_store=hosts)
+    assert "revoked" in str(error.value.detail)
+    assert len(unregistered) == 1
+    assert unregistered[0] in fake.terminated
+    assert len(fake.host_starts) == (1 if relaunch else 0)
+
+
+async def test_registration_database_failure_still_attempts_provider_cleanup(db_uri, monkeypatch):
+    hosts = HostStore(db_uri)
+    fake = FakeSandboxLauncher()
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(hosts, "register_managed_host", unavailable)
+    monkeypatch.setattr(hosts, "get_host", unavailable)
+    with pytest.raises(HTTPException, match="database unavailable"):
+        await launch_managed_host(config=_injected_config(fake), owner=_OWNER, host_store=hosts)
+    assert len(fake.terminated) == 1
+    assert fake.host_starts == []

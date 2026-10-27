@@ -215,6 +215,48 @@ def test_main_uses_explicit_coords_path(
     assert capsys.readouterr().out.strip() == "dbx-tok"
 
 
+@pytest.mark.parametrize("workspace", ["https://ws.example", "https://ws.example/"])
+def test_main_prints_bearer_only_for_the_saved_workspace(
+    workspace: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()
+    assert (
+        dc.main(["token", "--coords", str(tmp_path / dc._SIDECAR_NAME), "--workspace", workspace])
+        == 0
+    )
+    assert capsys.readouterr().out.strip() == "dbx-tok"
+
+
+def test_main_withholds_bearer_when_saved_workspace_differs_from_sidecar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    called = _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    called.clear()
+    capsys.readouterr()
+    assert (
+        dc.main(
+            [
+                "token",
+                "--coords",
+                str(tmp_path / dc._SIDECAR_NAME),
+                "--workspace",
+                "https://saved-workspace.example",
+            ]
+        )
+        == 1
+    )
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "dbx-tok" not in output.err
+    assert called == {}
+
+
 def test_main_silent_without_sidecar(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -246,8 +288,12 @@ def test_main_ignores_unknown_operation(
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("pinned_workspace", [False, True])
 def test_main_withholds_token_when_broker_workspace_changed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    pinned_workspace: bool,
 ) -> None:
     """Reconnect edge: the sidecar pins workspace A, but the owner has since
     reconnected to workspace B, so the broker now vends B's bearer. main() must
@@ -262,7 +308,8 @@ def test_main_withholds_token_when_broker_workspace_changed(
         ),
     )
     capsys.readouterr()  # discard configure-time log output
-    assert dc.main(["token"]) == 0
+    argv = ["token", "--workspace", "https://ws.example"] if pinned_workspace else ["token"]
+    assert dc.main(argv) == 0
     assert capsys.readouterr().out == ""  # withheld: workspace mismatch
 
 
@@ -310,3 +357,102 @@ def test_api_key_auth_precludes_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     # A spec-level DatabricksAuth is authoritative and is not a key, so the broker
     # still runs even when a global key exists.
     assert dc.api_key_auth_precludes_broker(dbx_spec) is False
+
+
+def _scripted_get(monkeypatch: pytest.MonkeyPatch, steps: list) -> list[int]:
+    """Serve *steps* in order (exceptions raised, responses returned); return call count."""
+    calls: list[int] = []
+
+    def fake_get(url: str, headers: dict, timeout: float):
+        calls.append(1)
+        step = steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+    monkeypatch.setattr(dc.httpx, "get", fake_get)
+    return calls
+
+
+_BEARER_OK = _Resp(
+    200, {"connected": True, "token": "dbx-tok", "workspace_host": "https://ws.example/"}
+)
+
+
+def test_main_retries_transient_broker_failures(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A connection blip or 503 must not empty the bearer and fail the turn."""
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()  # discard configure-time log output
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+    calls = _scripted_get(monkeypatch, [httpx.ConnectError("reset"), _Resp(503, None), _BEARER_OK])
+    assert dc.main(["token"]) == 0
+    assert capsys.readouterr().out.strip() == "dbx-tok"
+    assert len(calls) == 3
+
+
+def test_main_gives_up_after_retries_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+    calls = _scripted_get(
+        monkeypatch, [httpx.ConnectError("down"), httpx.ReadTimeout("slow"), _Resp(500, None)]
+    )
+    assert dc.main(["token"]) == 0
+    assert capsys.readouterr().out == ""
+    assert len(calls) == 3
+
+
+def test_main_retries_stay_within_one_timeout_budget(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A slow broker gets no extra attempts past the single-attempt timeout."""
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()
+    clock = [0.0]
+    monkeypatch.setattr(dc.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(dc.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    timeouts: list[float] = []
+
+    def slow_get(url: str, headers: dict, timeout: float):
+        timeouts.append(timeout)
+        clock[0] += timeout
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr(dc.httpx, "get", slow_get)
+    assert dc.main(["token"]) == 0
+    assert capsys.readouterr().out == ""
+    assert timeouts == [dc._TIMEOUT_S]
+
+
+def test_main_treats_a_non_transport_http_error_as_final(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+    calls = _scripted_get(monkeypatch, [httpx.TooManyRedirects("loop")])
+    assert dc.main(["token"]) == 0
+    assert capsys.readouterr().out == ""
+    assert len(calls) == 1
+
+
+def test_main_does_not_retry_a_rejected_launch_token(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 401/403 is permanent, so it is answered once rather than retried."""
+    _connected(monkeypatch)
+    assert dc.configure_host_databricks("https://omni.example", "h") is True
+    capsys.readouterr()
+    monkeypatch.setattr(dc, "_RETRY_BACKOFF_S", (0.0, 0.0))
+    calls = _scripted_get(monkeypatch, [_Resp(401, None)])
+    assert dc.main(["token"]) == 0
+    assert capsys.readouterr().out == ""
+    assert len(calls) == 1

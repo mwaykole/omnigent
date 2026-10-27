@@ -1,3 +1,20 @@
+import type * as SandboxModelOptionsModule from "@/hooks/useSandboxModelOptions";
+
+vi.mock("@/hooks/useSandboxModelOptions", async (importOriginal) => ({
+  ...(await importOriginal<typeof SandboxModelOptionsModule>()),
+  useSandboxModelOptions: vi.fn(() => ({
+    data: {
+      configured: false,
+      status: "unconfigured",
+      models: [],
+      configuration_revision: null,
+      provider_label: null,
+      default_model: null,
+    },
+    isLoading: false,
+    error: null,
+  })),
+}));
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useConversations as useTestConversations,
@@ -11,6 +28,7 @@ vi.mock("@/hooks/useSkills", () => ({
   useSkills: () => ({ skills: [], skillsStatus: "ready", refetch: vi.fn() }),
 }));
 import type * as UseConversationsModule from "@/hooks/useConversations";
+import type * as HostWorktreesModule from "@/hooks/useHostWorktrees";
 import type * as AgentLabelsModule from "@/lib/agentLabels";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -28,6 +46,7 @@ import type { HostWorktree } from "@/hooks/useHostWorktrees";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import type { ServerInfo } from "@/lib/capabilities";
 import { NewChatLandingScreen, resetLandingDraft } from "./NewChatDialog";
+import { TooltipProvider } from "@/components/ui/tooltip";
 
 // A `?project=` visit prefills the composer from the project's STORED config
 // (host / working directory / agent / worktree). A field the config leaves
@@ -43,6 +62,7 @@ const REPO = "/Users/corey/projects/alpha";
 // screen stays mounted; only the param changes).
 let searchParams = new URLSearchParams("project=Alpha");
 vi.mock("@/lib/routing", () => ({
+  useLocation: () => ({ hash: "", state: null }),
   useNavigate: () => navigateMock,
   useSearchParams: () => [searchParams, vi.fn()],
 }));
@@ -71,8 +91,13 @@ vi.mock("@/hooks/useHostFilesystem", () => ({
   useHostFilesystem: () => ({ data: undefined }),
   useCreateHostDirectory: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
-vi.mock("@/hooks/useHostWorktrees", () => ({
+vi.mock("@/hooks/useHostWorktrees", async (importOriginal) => ({
+  ...(await importOriginal<typeof HostWorktreesModule>()),
   useHostWorktrees: vi.fn(),
+  hostWorktreesQueryOptions: (hostId: string, repoPath: string) => ({
+    queryKey: ["host-worktrees", hostId, repoPath],
+    queryFn: async () => [],
+  }),
 }));
 vi.mock("@/hooks/useDirectorySessions", () => ({
   useDirectorySessions: () => ({ data: [] }),
@@ -115,7 +140,7 @@ function agent(overrides: Partial<AvailableAgent> = {}): AvailableAgent {
     name: "hello_world",
     display_name: "Hello World",
     description: null,
-    harness: null,
+    harness: "claude-sdk",
     skills: [],
     ...overrides,
   };
@@ -140,7 +165,14 @@ function setRepoIsGit(): void {
     const known = hostId === "host_1" && path === REPO;
     return {
       data: known
-        ? ([{ path: REPO, branch: "main", is_main: true, detached: false }] as HostWorktree[])
+        ? ([
+            {
+              path: REPO,
+              branch: "main",
+              is_main: true,
+              detached: false,
+            },
+          ] as HostWorktree[])
         : ([] as HostWorktree[]),
       isError: false,
     } as ReturnType<typeof useHostWorktrees>;
@@ -171,7 +203,9 @@ function renderLanding(): { rerender: (ui: ReactNode) => void; unmount: () => vo
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={client}>
-        <CapabilitiesProvider info={info}>{children}</CapabilitiesProvider>
+        <CapabilitiesProvider info={info}>
+          <TooltipProvider>{children}</TooltipProvider>
+        </CapabilitiesProvider>
       </QueryClientProvider>
     );
   }
@@ -204,7 +238,9 @@ function renderSandboxLanding(): { rerender: (ui: ReactNode) => void } {
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={client}>
-        <CapabilitiesProvider info={info}>{children}</CapabilitiesProvider>
+        <CapabilitiesProvider info={info}>
+          <TooltipProvider>{children}</TooltipProvider>
+        </CapabilitiesProvider>
       </QueryClientProvider>
     );
   }
@@ -237,7 +273,9 @@ function renderRoutingLanding(): { rerender: (ui: ReactNode) => void; unmount: (
   function Wrapper({ children }: { children: ReactNode }) {
     return (
       <QueryClientProvider client={client}>
-        <CapabilitiesProvider info={info}>{children}</CapabilitiesProvider>
+        <CapabilitiesProvider info={info}>
+          <TooltipProvider>{children}</TooltipProvider>
+        </CapabilitiesProvider>
       </QueryClientProvider>
     );
   }
@@ -247,7 +285,7 @@ function renderRoutingLanding(): { rerender: (ui: ReactNode) => void; unmount: (
 
 /**
  * Open the picker and commit (select + close) an agent by clicking its row.
- * The composed agents these tests use live under the "Custom agents"
+ * The composed agents these tests use live under the custom-agent "Other..."
  * submenu, so drill in when the row isn't already listed inline.
  */
 function selectAgent(agentId: string): void {
@@ -474,6 +512,40 @@ describe("NewChatLandingScreen project prefill", () => {
     expect(body.git).toBeUndefined();
   });
 
+  it("suppresses stored project git defaults after switching to a non-git workspace", async () => {
+    const config = {
+      host_id: "host_1",
+      workspace: REPO,
+      git: { branch_name: "feature/project-default" },
+    };
+    setProjectConfig(config);
+    renderLanding();
+
+    const worktree = screen.getByTestId("new-chat-landing-branch-chip");
+    await waitFor(() => expect(worktree).toBeEnabled());
+    fireEvent.click(worktree);
+    fireEvent.change(screen.getByTestId("new-chat-landing-branch-input"), {
+      target: { value: "feature/explicit-worktree" },
+    });
+    expect(worktree).toHaveTextContent("feature/explicit-worktree");
+
+    fireEvent.click(screen.getByTestId("new-chat-landing-workspace-chip"));
+    fireEvent.click(screen.getByRole("button", { name: RECENT_WORKSPACE }));
+    expect(screen.getByTestId("new-chat-landing-workspace-chip")).toHaveAttribute(
+      "title",
+      RECENT_WORKSPACE,
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("new-chat-landing-branch-chip")).not.toBeInTheDocument(),
+    );
+
+    const body = await submitAndReadBody();
+    expect(body.project_id).toBe("proj_alpha");
+    expect(body.workspace).toBe(RECENT_WORKSPACE);
+    // Explicit null prevents the server from restoring the project's git default.
+    expect(body.git).toBeNull();
+  });
+
   it("falls back to the generic defaults when the project has no config", async () => {
     setProjectConfig({});
     renderLanding();
@@ -482,7 +554,7 @@ describe("NewChatLandingScreen project prefill", () => {
     expect(body.host_id).toBe("host_1");
     expect(body.workspace).toBe(RECENT_WORKSPACE);
     expect(body.agent_id).toBe("ag_hello");
-    expect(body.git).toBeUndefined();
+    expect(body.git).toBeNull();
   });
 
   it("seeds only the host from config, leaving the workspace to the generic default", async () => {
@@ -626,8 +698,18 @@ describe("NewChatLandingScreen project prefill", () => {
   const MAIN_REPO = "/Users/corey/projects/gamma";
   const LINKED_WORKTREE = "/Users/corey/projects/gamma-worktrees/feature-x";
   const WORKTREE_LIST: HostWorktree[] = [
-    { path: MAIN_REPO, branch: "main", is_main: true, detached: false },
-    { path: LINKED_WORKTREE, branch: "feature/x", is_main: false, detached: false },
+    {
+      path: MAIN_REPO,
+      branch: "main",
+      is_main: true,
+      detached: false,
+    },
+    {
+      path: LINKED_WORKTREE,
+      branch: "feature/x",
+      is_main: false,
+      detached: false,
+    },
   ];
 
   function setWorktreeRepo(): void {
@@ -676,7 +758,7 @@ describe("NewChatLandingScreen project prefill", () => {
     const worktreeTrigger = screen.getByTestId("new-chat-landing-branch-chip");
     await waitFor(() => expect(workspaceTrigger).toHaveAttribute("title", LINKED_WORKTREE));
     expect(workspaceTrigger).toHaveTextContent("gamma");
-    expect(worktreeTrigger).toHaveTextContent("feature/x");
+    expect(worktreeTrigger).toHaveTextContent("feature-x");
     expect(worktreeTrigger).toHaveAttribute("title", "Existing worktree branch: feature/x");
     const body = await submitAndReadBody();
     // Bound straight to the worktree dir; the worktree's branch rides along and
@@ -888,6 +970,276 @@ describe("NewChatLandingScreen project prefill", () => {
     expect(body.cost_control_mode_override).not.toBe("on");
   });
 
+  // ── Project default effort ── the stored `effort` seeds the composer's effort
+  // pick (→ create-body reasoning_effort) on the project's configured agent,
+  // validated against that harness's ladder like the model.
+  function openAgentConfig(agentId: string): void {
+    fireEvent.pointerDown(screen.getByTestId("new-chat-landing-agent-select"), { button: 0 });
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-select"));
+    fireEvent.click(screen.getByTestId(`new-chat-landing-agent-config-${agentId}`));
+  }
+
+  function closeAgentConfig(): void {
+    fireEvent.keyDown(screen.getByTestId("new-chat-landing-agent-models"), { key: "Escape" });
+  }
+
+  const CODEX_AGENT_ID = "ag_codex";
+  const ladder = (...efforts: string[]) => efforts.map((reasoningEffort) => ({ reasoningEffort }));
+
+  // Codex with a default model offering `defaultLadder` and a `gpt-mini` offering only low.
+  function setCodexAgentAndModels(defaultLadder: string[]): void {
+    vi.mocked(useAvailableAgents).mockReturnValue({
+      data: [
+        agent(),
+        agent({
+          id: CODEX_AGENT_ID,
+          name: "codex-native-ui",
+          display_name: "Codex",
+          harness: "codex-native",
+        }),
+      ],
+    } as ReturnType<typeof useAvailableAgents>);
+    vi.mocked(useHostModelOptions).mockReturnValue({
+      data: [
+        {
+          id: "gpt-5.5",
+          displayName: "GPT-5.5",
+          isDefault: true,
+          supportedReasoningEfforts: ladder(...defaultLadder),
+        },
+        { id: "gpt-mini", displayName: "GPT mini", supportedReasoningEfforts: ladder("low") },
+      ],
+    } as ReturnType<typeof useHostModelOptions>);
+  }
+
+  async function waitForCodexAgent(): Promise<void> {
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/Codex/),
+    );
+  }
+
+  async function waitForClaudeAgent(): Promise<void> {
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(
+        /Claude Code/,
+      ),
+    );
+  }
+
+  it("seeds reasoning_effort from the project default, outranking the remembered effort", async () => {
+    setClaudeAgentAndModels();
+    localStorage.setItem(
+      HARNESS_OPTIONS_KEY,
+      JSON.stringify({ "claude-native": { effort: "low" } }),
+    );
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+    renderLanding();
+
+    await waitForClaudeAgent();
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("high");
+  });
+
+  it("treats a project effort outside the harness ladder as no default", async () => {
+    setClaudeAgentAndModels();
+    localStorage.setItem(
+      HARNESS_OPTIONS_KEY,
+      JSON.stringify({ "claude-native": { effort: "low" } }),
+    );
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "minimal" });
+    renderLanding();
+
+    await waitForClaudeAgent();
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("low");
+  });
+
+  it("keeps a user's committed effort pick when the project config changes afterwards", async () => {
+    setClaudeAgentAndModels();
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID });
+    const { rerender } = renderLanding();
+    await waitForClaudeAgent();
+
+    openAgentConfig(CLAUDE_AGENT_ID);
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-effort-medium"));
+    closeAgentConfig();
+
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "max" });
+    rerender(<NewChatLandingScreen />);
+
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("medium");
+  });
+
+  it("lets a project effort without a model outrank remembered Smart Routing", async () => {
+    setClaudeAgentAndModels();
+    localStorage.setItem(
+      HARNESS_OPTIONS_KEY,
+      JSON.stringify({ "claude-native": { routing: "on", effort: "low" } }),
+    );
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+    renderRoutingLanding();
+
+    await waitForClaudeAgent();
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.cost_control_mode_override).not.toBe("on");
+  });
+
+  it("keeps remembered Smart Routing off after an explicit effort pick over the project effort", async () => {
+    setClaudeAgentAndModels();
+    localStorage.setItem(
+      HARNESS_OPTIONS_KEY,
+      JSON.stringify({ "claude-native": { routing: "on", effort: "low" } }),
+    );
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+    renderRoutingLanding();
+    await waitForClaudeAgent();
+
+    openAgentConfig(CLAUDE_AGENT_ID);
+    fireEvent.click(screen.getByTestId("new-chat-landing-agent-effort-medium"));
+    closeAgentConfig();
+
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("medium");
+    expect(body.cost_control_mode_override).not.toBe("on");
+  });
+
+  it("lets a project effort win over a landing draft that restored Smart Routing on", async () => {
+    setClaudeAgentAndModels();
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID });
+    const { unmount } = renderRoutingLanding();
+    await waitForClaudeAgent();
+    openAgentConfig(CLAUDE_AGENT_ID);
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Smart Routing" }));
+    closeAgentConfig();
+    unmount();
+
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+    renderRoutingLanding();
+    await waitForClaudeAgent();
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.cost_control_mode_override).not.toBe("on");
+  });
+
+  it.each([
+    { pick: "Smart Routing", sent: { cost_control_mode_override: "on" } },
+    { pick: "Sonnet", sent: { model_override: "sonnet" } },
+  ])(
+    "keeps an explicit $pick pick when a project effort arrives afterwards",
+    async ({ pick, sent }) => {
+      setClaudeAgentAndModels();
+      setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID });
+      const { rerender } = renderRoutingLanding();
+      await waitForClaudeAgent();
+      openAgentConfig(CLAUDE_AGENT_ID);
+      fireEvent.click(screen.getByRole("menuitemcheckbox", { name: pick }));
+      closeAgentConfig();
+
+      setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+      rerender(<NewChatLandingScreen />);
+
+      const body = await submitAndReadBody();
+      expect(body).toMatchObject(sent);
+      expect(body.reasoning_effort).toBeUndefined();
+    },
+  );
+
+  it("leaves the project effort off when the user switches to another agent", async () => {
+    setClaudeAgentAndModels();
+    setProjectConfig({ host_id: "host_1", agent_id: CLAUDE_AGENT_ID, effort: "high" });
+    renderLanding();
+    await waitForClaudeAgent();
+    selectAgent("ag_hello");
+
+    const body = await submitAndReadBody();
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it.each([
+    { label: "the catalog default", model: undefined, sentModel: undefined, sentEffort: "xhigh" },
+    { label: "a pinned model", model: "gpt-mini", sentModel: "gpt-mini", sentEffort: undefined },
+  ])(
+    "checks a Codex project effort against $label's ladder",
+    async ({ model, sentModel, sentEffort }) => {
+      setCodexAgentAndModels(["low", "medium", "high", "xhigh"]);
+      setProjectConfig({
+        host_id: "host_1",
+        agent_id: CODEX_AGENT_ID,
+        effort: "xhigh",
+        ...(model ? { model } : {}),
+      });
+      renderLanding();
+      await waitForCodexAgent();
+      const body = await submitAndReadBody();
+      expect(body.model_override).toBe(sentModel);
+      expect(body.reasoning_effort).toBe(sentEffort);
+    },
+  );
+
+  it.each([
+    { routing: "off", sentModel: "gpt-mini", sentEffort: "low" },
+    // Remembered routing drops the remembered model, so the default model's ladder applies.
+    { routing: "on", sentModel: undefined, sentEffort: "xhigh" },
+  ])(
+    "checks a modelless Codex project effort against the seeded model (remembered routing $routing)",
+    async ({ routing, sentModel, sentEffort }) => {
+      setCodexAgentAndModels(["low", "high", "xhigh"]);
+      localStorage.setItem(
+        HARNESS_OPTIONS_KEY,
+        JSON.stringify({ "codex-native": { routing, model: "gpt-mini", effort: "low" } }),
+      );
+      setProjectConfig({ host_id: "host_1", agent_id: CODEX_AGENT_ID, effort: "xhigh" });
+      renderRoutingLanding();
+      await waitForCodexAgent();
+      const body = await submitAndReadBody();
+      expect(body.cost_control_mode_override).not.toBe("on");
+      expect(body.model_override).toBe(sentModel);
+      expect(body.reasoning_effort).toBe(sentEffort);
+    },
+  );
+
+  it("turns off a Smart Routing draft when the remembered Codex model runs instead", async () => {
+    setCodexAgentAndModels(["low", "high", "xhigh"]);
+    setProjectConfig({ host_id: "host_1", agent_id: CODEX_AGENT_ID });
+    const { unmount } = renderRoutingLanding();
+    await waitForCodexAgent();
+    openAgentConfig(CODEX_AGENT_ID);
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Smart Routing" }));
+    closeAgentConfig();
+    unmount();
+
+    // A later pick elsewhere remembered a model with routing off; the parked draft still says on.
+    // That model can't run the project effort, so the seed pins the model, not the effort.
+    localStorage.setItem(
+      HARNESS_OPTIONS_KEY,
+      JSON.stringify({ "codex-native": { routing: "off", model: "gpt-mini", effort: "low" } }),
+    );
+    setProjectConfig({ host_id: "host_1", agent_id: CODEX_AGENT_ID, effort: "xhigh" });
+    renderRoutingLanding();
+    await waitForCodexAgent();
+    const body = await submitAndReadBody();
+    expect(body.cost_control_mode_override).not.toBe("on");
+    expect(body.model_override).toBe("gpt-mini");
+    expect(body.reasoning_effort).toBe("low");
+  });
+
+  it("seeds a Pi-only project effort for a Pi agent", async () => {
+    vi.mocked(useAvailableAgents).mockReturnValue({
+      data: [
+        agent(),
+        agent({ id: "ag_pi", name: "pi-native-ui", display_name: "Pi", harness: "pi-native" }),
+      ],
+    } as ReturnType<typeof useAvailableAgents>);
+    setProjectConfig({ host_id: "host_1", agent_id: "ag_pi", effort: "minimal" });
+    renderLanding();
+    await waitFor(() =>
+      expect(screen.getByTestId("new-chat-landing-agent-select")).toHaveAccessibleName(/Pi/),
+    );
+    expect((await submitAndReadBody()).reasoning_effort).toBe("minimal");
+  });
+
   it("still seeds the recent workspace when the worktree probe errors", async () => {
     // A non-400 failure from /worktrees leaves the hook's data undefined for
     // good. The seed must fall back to the candidate as-is (treat the probe
@@ -1040,7 +1392,7 @@ describe("NewChatLandingScreen global always-use-worktree default", () => {
     localStorage.removeItem(ALWAYS_WORKTREE_KEY);
     renderLanding();
 
-    await waitFor(() => expect(branchLabel()).toBe("New worktree"));
+    await waitFor(() => expect(branchLabel()).toBe("None"));
     const body = await submitAndReadBody();
     expect(body.workspace).toBe(REPO);
     expect(body.git).toBeUndefined();

@@ -126,7 +126,18 @@ class SysScheduledTaskCreateTool(Tool):
                                 "Optional PIN of a connected host to run on, from the "
                                 "current workspace's host list. Omit to run on the owner's "
                                 "online host at fire time; a failed run is recorded if none "
-                                "is online."
+                                "is online. Existing managed sandbox hosts cannot be pinned."
+                            ),
+                        },
+                        "execution_target": {
+                            "type": "string",
+                            "enum": ["connected_host", "managed_sandbox"],
+                            "description": (
+                                "Where each firing runs. 'connected_host' (default) uses a "
+                                "pinned/resolved connected host. 'managed_sandbox' provisions "
+                                "a fresh server-managed sandbox per firing, using the server's "
+                                "sandbox lifecycle settings. Do not set host_id or workspace "
+                                "with it. Requires managed sandboxes configured on the server."
                             ),
                         },
                     },
@@ -182,7 +193,8 @@ class SysScheduledTaskUpdateTool(Tool):
             "Update a scheduled task's mutable fields. Only the fields you pass "
             "change; omit the rest. Pass agent_id to switch which agent/harness "
             "it runs. Pass state='paused' to stop it firing without deleting it, "
-            "or state='active' to resume."
+            "or state='active' to resume. A 'completed' task has no remaining "
+            "occurrences; change its rrule to schedule it again."
         )
 
     def get_schema(self) -> dict[str, Any]:
@@ -239,6 +251,15 @@ class SysScheduledTaskUpdateTool(Tool):
                         "host_id": {
                             "type": "string",
                             "description": "New connected host to run on.",
+                        },
+                        "execution_target": {
+                            "type": "string",
+                            "enum": ["connected_host", "managed_sandbox"],
+                            "description": (
+                                "Switch where firings run. 'managed_sandbox' provisions a "
+                                "fresh server-managed sandbox per firing (clears any pinned "
+                                "host; do not also set host_id or workspace)."
+                            ),
                         },
                         "state": {
                             "type": "string",
