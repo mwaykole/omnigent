@@ -105,6 +105,7 @@ from omnigent.claude_native_state import (
     redirect_launch_state,
     write_launch_state,
 )
+from omnigent.cli_invocation import cli_invocation
 from omnigent.conversation_browser import conversation_url, open_conversation_link_if_enabled
 from omnigent.entities.session_resources import terminal_resource_id
 from omnigent.host.daemon_launch import (
@@ -134,7 +135,8 @@ from omnigent.native_terminal import (
 from omnigent.native_terminal import (
     terminal_attach_url as _attach_url,
 )
-from omnigent.terminals.ws_bridge import (
+from omnigent.process_logging import log_info_once
+from omnigent.terminals.ws_common import (
     WS_CLOSE_TERMINAL_DETACHED,
     WS_CLOSE_TERMINAL_NOT_FOUND,
 )
@@ -197,6 +199,12 @@ _CLAUDE_CODE_USE_GATEWAY_ENV = "CLAUDE_CODE_USE_GATEWAY"
 #: Kill-switch Claude Code treats as covering nonessential startup traffic;
 #: the probe strips it so speed knobs never mask harness output.
 _CLAUDE_NONESSENTIAL_TRAFFIC_ENV = "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+#: Starting page size for the cold-resume history fetch. On a 5xx the fetch
+#: halves the page size down to the floor before giving up — a deployed
+#: backend can choke on one oversized page of a big conversation while the
+#: same rows page fine at smaller sizes.
+_CLAUDE_RESUME_ITEMS_PAGE_LIMIT = 1000
+_CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR = 100
 _CLAUDE_MODEL_PROBE_TIMEOUT_S = 20.0
 #: Wall-clock cap for the per-alias resolution fan-out as a whole; aliases
 #: still unresolved when it expires keep their bare rows (the cache's
@@ -254,11 +262,24 @@ _SESSION_LABELS = {
     _WRAPPER_LABEL_KEY: _WRAPPER_LABEL_VALUE,
 }
 _CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
-_CLAUDE_CODE_MANAGED_SETTINGS_PATHS: tuple[Path, ...] = (
-    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
-    Path("/etc/claude-code/managed-settings.json"),
-    Path(os.environ.get("PROGRAMDATA", "C:/ProgramData")) / "ClaudeCode" / "managed-settings.json",
-)
+# Test override for the managed-settings chain. ``None`` means "use the ambient
+# detector's chain" — the single canonical definition (``ambient`` owns both the
+# path list and the parser). Binding a *copy* here would create a second source
+# of host state that a test fixture could neutralize independently of the other,
+# so both readers below resolve through ``_managed_settings_paths`` at call time.
+_CLAUDE_CODE_MANAGED_SETTINGS_PATHS: tuple[Path, ...] | None = None
+
+
+def _managed_settings_paths() -> tuple[Path, ...]:
+    """The Claude Code managed-settings chain to read (ambient's, or a test override)."""
+    override = _CLAUDE_CODE_MANAGED_SETTINGS_PATHS
+    if override is not None:
+        return override
+    from omnigent.onboarding.ambient import CLAUDE_CODE_MANAGED_SETTINGS_PATHS
+
+    return CLAUDE_CODE_MANAGED_SETTINGS_PATHS
+
+
 _CLAUDE_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _RESUME_ACTION_SWITCH = "switch"
 _RESUME_ACTION_MOVE = "move"
@@ -352,7 +373,7 @@ class PreparedClaudeTerminal:
         when the runner did not advertise a socket. Drives the
         same-machine direct ``tmux attach`` fast path; a remote
         runner's socket won't exist locally, so the attach falls back
-        to the WebSocket PTY bridge.
+        to the WebSocket terminal bridge.
     :param tmux_target: tmux ``-t`` target for the terminal pane,
         e.g. ``"main"``. ``None`` when unavailable. Paired with
         ``tmux_socket`` for the direct attach.
@@ -633,7 +654,7 @@ def _managed_claude_model_config() -> ClaudeNativeUcodeConfig | None:
         _ANTHROPIC_CUSTOM_MODEL_OPTION_ENV,
         _ANTHROPIC_CUSTOM_MODEL_OPTION_NAME_ENV,
     }
-    for path in _CLAUDE_CODE_MANAGED_SETTINGS_PATHS:
+    for path in _managed_settings_paths():
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -666,25 +687,9 @@ def managed_claude_gateway_signal() -> tuple[str | None, bool]:
     :returns: ``(base_url, has_credential)`` from the first readable managed
         settings file, or ``(None, False)`` when none is present or parseable.
     """
-    for path in _CLAUDE_CODE_MANAGED_SETTINGS_PATHS:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        raw_env = payload.get("env")
-        env = raw_env if isinstance(raw_env, dict) else {}
-        raw_base_url = env.get("ANTHROPIC_BASE_URL")
-        base_url = raw_base_url.strip() if isinstance(raw_base_url, str) else None
-        has_helper = bool(payload.get("apiKeyHelper"))
-        use_gateway = str(env.get("CLAUDE_CODE_USE_GATEWAY", "")).strip().lower() not in (
-            "",
-            "0",
-            "false",
-        )
-        return base_url or None, has_helper or use_gateway
-    return None, False
+    from omnigent.onboarding.ambient import claude_managed_gateway
+
+    return claude_managed_gateway(_managed_settings_paths())
 
 
 def claude_native_model_options(
@@ -775,9 +780,9 @@ def _parse_claude_current_model(stdout: str) -> dict[str, str]:
     Extract the resolved model from a stream-json ``/model`` probe run.
 
     Two harness-owned facts, taken verbatim: the ``init`` event's exact
-    model id, and the printed ``Current model:`` label with only the
-    trailing ``(effort: …)`` suffix stripped — so labels like
-    ``Opus 4.8 (1M context)`` survive untouched.
+    model id, and the printed ``Current model:`` label with only markdown
+    backticks and the trailing ``(effort: …)`` / ``(default)`` suffixes
+    stripped — so labels like ``Opus 4.8 (1M context)`` survive untouched.
 
     :param stdout: The run's ``--output-format stream-json`` stdout.
     :returns: Whichever of ``{"model": …, "label": …}`` parsed.
@@ -799,7 +804,13 @@ def _parse_claude_current_model(stdout: str) -> dict[str, str]:
                 _, marker, tail = text_line.partition("Current model:")
                 if not marker:
                     continue
-                label = re.sub(r"\s*\(effort:[^)]*\)\s*$", "", tail).strip()
+                # Some harness releases print the name as markdown code
+                # (``Current model: `Opus 5```); no model name holds a backtick.
+                plain = tail.replace("`", "")
+                # The enumeration run's label can carry a trailing
+                # ``(default)`` marker — CLI presentation, not the name.
+                plain = re.sub(r"\s*\(default\)\s*$", "", plain.strip())
+                label = re.sub(r"\s*\(effort:[^)]*\)\s*$", "", plain).strip()
                 if label:
                     resolved["label"] = label
                 break
@@ -1097,21 +1108,29 @@ async def probe_claude_model_options(
 
 
 def claude_catalog_fingerprint(claude_config: ClaudeNativeUcodeConfig | None) -> str:
-    """The launch-config fingerprint keying claude's shared model catalog.
+    """The launch fingerprint keying claude's shared model catalog.
 
     One formula for every consumer (host boot probe, runner launch, session
     listing), so they read and write the same catalog file.
 
+    The Claude Code executable is part of the key. The catalog holds that
+    binary's own answer, so an upgraded CLI must re-probe instead of
+    serving model names the previous release printed. The binary is
+    resolved the same way the probe launches it.
+
     :param claude_config: The resolved launch config, or ``None``.
     :returns: A stable fingerprint string.
     """
-    from omnigent.model_catalog_store import fingerprint_of
+    from omnigent.claude_launcher import resolve_claude_launch
+    from omnigent.model_catalog_store import binary_identity, fingerprint_of
 
+    command, _ = resolve_claude_launch("claude", [])
     return fingerprint_of(
         "claude-native",
         sorted(claude_config.env.items()) if claude_config is not None else None,
         claude_config.api_key_helper if claude_config is not None else None,
         claude_config.model if claude_config is not None else None,
+        binary_identity(command),
     )
 
 
@@ -1203,6 +1222,20 @@ async def claude_launch_catalog(
     fingerprint = claude_catalog_fingerprint(claude_config)
     return await model_catalog_store.ensure_catalog(
         "claude-native", fingerprint, lambda: claude_model_catalog(claude_config)
+    )
+
+
+def claude_launch_catalog_is_stale(claude_config: ClaudeNativeUcodeConfig | None) -> bool:
+    """
+    Whether this config's stored catalog is past the freshness TTL.
+
+    :param claude_config: The resolved launch config, or ``None``.
+    :returns: ``True`` when the store holds only a stale entry.
+    """
+    from omnigent import model_catalog_store
+
+    return model_catalog_store.catalog_is_stale(
+        "claude-native", claude_catalog_fingerprint(claude_config)
     )
 
 
@@ -1396,29 +1429,54 @@ def _resolve_session_id_for_resume(
 
     :param base_url: Omnigent server base URL.
     :param headers: HTTP auth headers; ``{}`` for local server.
-    :param session_id: Explicit ``--resume <id>``; wins over the picker.
+    :param session_id: Explicit ``--resume <id>``; wins over the picker
+        and is never host-filtered (diagnostics / migration workflows).
     :param resume_picker: ``True`` for bare ``--resume`` (no value).
     :returns: Conversation id, or ``None`` for "start fresh" / picker cancelled.
-    :raises click.ClickException: Picker requested but no prior sessions exist.
+    :raises click.ClickException: Picker requested but the session list
+        could not be fetched (a persistent rate-limit, an auth/server
+        failure, …) or the local host identity is mis-configured — a
+        concise error, never a raw SDK traceback.
     """
     if session_id is not None:
         return session_id
     if not resume_picker:
         return None
     # Deferred — omnigent_client / repl pull in heavy graphs we don't want at startup.
-    from omnigent_client import OmnigentClient
+    from omnigent_client import OmnigentClient, OmnigentError
 
+    from omnigent.host.identity import load_host_identity_if_present
     from omnigent.repl._resume_picker import pick_conversation_by_wrapper_label_from_sdk
+
+    # Native transcript / workspace state is host-local, so the picker
+    # scopes to sessions bound to THIS machine's host id. Read-only
+    # lookup: a machine that never registered as a host has no id and
+    # the picker lists unfiltered rather than minting an identity here.
+    # A mis-configured identity (only one of the launch env vars set)
+    # raises ValueError — keep that concise too.
+    try:
+        identity = load_host_identity_if_present()
+    except ValueError as exc:
+        raise click.ClickException(
+            f"Could not resolve this machine's host identity: {exc}"
+        ) from exc
+    invoking_host_id = identity.host_id if identity is not None else None
 
     async def _drive() -> str | None:
         async with OmnigentClient(
             base_url=base_url, headers=headers if headers else None
         ) as client:
             return await pick_conversation_by_wrapper_label_from_sdk(
-                client, wrapper_value=_WRAPPER_LABEL_VALUE, agent_name=_AGENT_NAME
+                client,
+                wrapper_value=_WRAPPER_LABEL_VALUE,
+                agent_name=_AGENT_NAME,
+                host_id=invoking_host_id,
             )
 
-    return asyncio.run(_drive())
+    try:
+        return asyncio.run(_drive())
+    except OmnigentError as exc:
+        raise click.ClickException(f"Could not list sessions to resume: {exc}") from exc
 
 
 def _align_working_directory_with_session(
@@ -2033,7 +2091,7 @@ def _fetch_external_session_id_for_redirect(
         if resp.status_code >= 400:
             return None
         payload = resp.json()
-    except Exception:  # noqa: BLE001 - optional redirect preflight
+    except Exception:  # noqa: BLE001
         _logger.warning(
             "failed to fetch external Claude session id for redirect; session=%s",
             session_id,
@@ -2499,7 +2557,7 @@ def _ucode_config_for_profile(
     if agent_state is None:
         raise click.ClickException(
             f"ucode state for profile {profile!r} does not include a Claude agent entry. "
-            "Run `omnigent setup --internal-beta` to refresh ucode configuration."
+            f"Run `{cli_invocation()} setup --internal-beta` to refresh ucode configuration."
         )
 
     base_url = agent_state.env.get(_UCODE_CLAUDE_BASE_URL_ENV) or agent_state.base_url
@@ -2509,12 +2567,12 @@ def _ucode_config_for_profile(
         raise click.ClickException(
             f"ucode state for profile {profile!r} is missing Claude base URL "
             f"({_UCODE_CLAUDE_BASE_URL_ENV} / base_url). "
-            "Run `omnigent setup --internal-beta` to refresh ucode configuration."
+            f"Run `{cli_invocation()} setup --internal-beta` to refresh ucode configuration."
         )
     if not agent_state.auth_command:
         raise click.ClickException(
             f"ucode state for profile {profile!r} is missing Claude auth_command. "
-            "Run `omnigent setup --internal-beta` to refresh ucode configuration."
+            f"Run `{cli_invocation()} setup --internal-beta` to refresh ucode configuration."
         )
 
     refresh_interval_ms = (
@@ -2536,7 +2594,7 @@ def _ucode_config_for_profile(
             live_catalog = discover_databricks_claude_catalog(creds.host, creds.token)
             live_models = live_catalog.families
             routable_models = live_catalog.model_ids
-        except Exception:  # noqa: BLE001 — cached ucode state is the launch fallback
+        except Exception:  # noqa: BLE001
             _logger.warning(
                 "native-claude: live Databricks model discovery failed for profile %r; "
                 "using cached ucode models",
@@ -2719,7 +2777,8 @@ def _provider_config_for_native_claude(entry: ProviderEntry) -> ClaudeNativeUcod
             entry.name,
         )
         return None
-    _logger.info(
+    log_info_once(
+        _logger,
         "native-claude routing: provider %r (base_url=%s, model=%s)",
         entry.name,
         family.base_url,
@@ -2848,7 +2907,8 @@ def _bedrock_config_for_native_claude(entry: ProviderEntry) -> ClaudeNativeUcode
             "Bedrock account. Set models.default to a Bedrock inference-profile id.",
             entry.name,
         )
-    _logger.info(
+    log_info_once(
+        _logger,
         "native-claude routing: bedrock provider %r (base_url=%s, model=%s)",
         entry.name,
         family.base_url,
@@ -2905,9 +2965,11 @@ def _native_claude_config_from_entry(
     if entry.kind == BEDROCK_KIND:
         return _bedrock_config_for_native_claude(entry)
     if entry.kind == DATABRICKS_KIND:
-        _logger.info("native-claude routing: Databricks ucode profile %r", entry.profile)
+        log_info_once(_logger, "native-claude routing: Databricks ucode profile %r", entry.profile)
         return _ucode_config_for_profile(entry.profile, refresh_models=refresh_models)
-    _logger.info("native-claude routing: Claude CLI login (subscription provider %r)", entry.name)
+    log_info_once(
+        _logger, "native-claude routing: Claude CLI login (subscription provider %r)", entry.name
+    )
     return None
 
 
@@ -2979,10 +3041,11 @@ def resolve_native_claude_config(
     entry = default_provider_for_harness(effective_config_with_detected(explicit), "claude-sdk")
     if entry is not None:
         return _native_claude_config_from_entry(entry, refresh_models=refresh_models)
-    _logger.info(
+    log_info_once(
+        _logger,
         "native-claude routing: Claude CLI login (no provider configured for the Claude "
         "harness, no Databricks profile). Run `omnigent setup --no-internal-beta` to route "
-        "through a provider."
+        "through a provider.",
     )
     return None
 
@@ -3036,6 +3099,37 @@ def _materialize_claude_agent_spec(tmpdir: Path) -> Path:
     }
     yaml_path.write_text(yaml.safe_dump(raw, sort_keys=False))
     return yaml_path
+
+
+def _wrapper_spec_raw_instructions(spec_path: Path) -> str | None:
+    """Resolve raw author instructions from the wrapper's agent spec.
+
+    Reuses :func:`omnigent.spec.load` (the same loader
+    :func:`~omnigent.cli._bundle` and the server use for both an agent-image
+    directory and a standalone single-file YAML) so the value matches exactly
+    what ``AgentSpec.instructions`` resolves to — including the
+    ``instructions:`` file precedence over ``prompt:`` — rather than
+    re-reading the raw YAML ad hoc.
+
+    :param spec_path: The generated/current wrapper agent spec (a
+        standalone YAML file or an agent-image directory).
+    :returns: The verbatim instructions text, or ``None`` if unresolvable
+        or absent/whitespace-only. Best-effort: a malformed spec must not
+        block the terminal launch, so load failures degrade to ``None``.
+    """
+    from omnigent.runtime.prompt import raw_author_instructions
+    from omnigent.spec import load as load_agent_spec
+
+    try:
+        spec = load_agent_spec(spec_path, expand_env=False)
+    except Exception:  # noqa: BLE001
+        _logger.warning(
+            "Could not resolve raw instructions from wrapper spec %s",
+            spec_path,
+            exc_info=True,
+        )
+        return None
+    return raw_author_instructions(spec)
 
 
 def _run_with_local_server(
@@ -3137,6 +3231,7 @@ def _run_with_local_server(
                     claude_config=claude_config,
                     startup_profiler=startup_profiler,
                     startup_progress=progress,
+                    append_system_prompt=_wrapper_spec_raw_instructions(spec_path),
                 )
             )
             _mark_startup_step(
@@ -3228,7 +3323,7 @@ def _can_attach_direct_tmux(prepared: PreparedClaudeTerminal) -> bool:
     socket exists on this host (so the runner shares this machine), and
     ``tmux`` is on PATH. This is the same-machine fast path: it wires the
     local TTY straight to the runner's tmux pane instead of relaying
-    every keystroke over the WebSocket PTY bridge. A remote runner's
+    every keystroke over the WebSocket terminal bridge. A remote runner's
     socket won't exist locally, so this returns ``False`` and the caller
     falls back to the WebSocket attach. Mirrors the Codex wrapper's
     :func:`omnigent.codex_native._can_attach_direct_tmux`.
@@ -3271,7 +3366,7 @@ async def _attach_direct_tmux(
         outlives the attach (user detached), else
         :attr:`_AttachOutcome.EXITED`.
     """
-    from omnigent.terminals.ws_bridge import _check_pane_dead_definitive, _tmux_session_alive
+    from omnigent.terminals.ws_common import _check_pane_dead_definitive, _tmux_session_alive
 
     startup_profiler = startup_profiler or StartupProfiler(name="omnigent claude", enabled=False)
     env = dict(os.environ)
@@ -3447,7 +3542,7 @@ async def _attach_with_transcript_forwarder(
                 await forwarder
             except asyncio.CancelledError:
                 pass
-            except Exception:  # noqa: BLE001 — cleanup must run regardless
+            except Exception:  # noqa: BLE001
                 # The forwarder is best-effort mirroring. A bug there
                 # (corrupt transcript JSONL, file-system error, anything
                 # uncaught in the parser) must not skip the Omnigent terminal
@@ -3542,7 +3637,7 @@ async def _attach_with_reconnect(
         if not first_attempt and recover is not None:
             try:
                 await recover()
-            except Exception:  # noqa: BLE001 — best-effort recovery
+            except Exception:  # noqa: BLE001
                 _logger.warning(
                     "claude-native reconnect recovery callback raised; retrying attach anyway",
                     exc_info=True,
@@ -3653,8 +3748,8 @@ async def _is_terminal_resource_gone(
     a clean tmux exit because Claude quit (the wrapper should stop).
     The runner's terminal-attach route emits close code ``4404`` when
     the resource is already marked stopped before attach, but a
-    teardown that races attach can produce a code-``1000`` close from
-    the PTY bridge instead. This GET disambiguates the two states.
+    teardown that races attach can produce a code-``1000`` bridge close.
+    This GET disambiguates the two states.
 
     HTTP / connection errors are treated as "not gone" so a server
     that's still bouncing (probe also fails) keeps the wrapper in the
@@ -3746,10 +3841,9 @@ def _is_terminal_detached_close(exc: ConnectionClosed) -> bool:
     """
     Return whether *exc* indicates the user detached from tmux.
 
-    The runner's PTY bridge closes the attach WebSocket with code
-    ``WS_CLOSE_TERMINAL_DETACHED`` (``4405``) when the ``tmux attach``
-    child exits but ``has-session`` confirms the session is still
-    alive — i.e. the user pressed the tmux detach key. Unlike a 4404
+    The runner's terminal bridge closes the attach WebSocket with code
+    ``WS_CLOSE_TERMINAL_DETACHED`` (``4405``) when the control client exits but
+    the tmux pane remains alive. Unlike a 4404
     (terminal gone), this must NOT end the session: the runner keeps
     running so the web UI stays connected.
 
@@ -4132,7 +4226,7 @@ def _run_with_remote_server(
     creates/resolves the session, persists the pass-through args, waits
     for the daemon-spawned runner + its auto-created terminal, and
     attaches (directly to the runner's tmux when it is local, else over
-    the WebSocket PTY bridge). See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
+    the WebSocket terminal bridge). See designs/NATIVE_RUNNER_SERVER_LAUNCH.md.
 
     :param base_url: Remote Omnigent server base URL without a trailing
         slash, e.g. ``"https://example.databricks.com"``.
@@ -4344,6 +4438,7 @@ async def _prepare_claude_terminal(
     claude_config: ClaudeNativeUcodeConfig | None = None,
     startup_profiler: StartupProfiler | None = None,
     startup_progress: RunnerStartupProgress | None = None,
+    append_system_prompt: str | None = None,
 ) -> PreparedClaudeTerminal:
     """
     Create/bind a session and launch its Claude terminal resource.
@@ -4361,6 +4456,10 @@ async def _prepare_claude_terminal(
         marks. ``None`` disables output.
     :param startup_progress: Optional user-visible progress renderer,
         e.g. a handle from :func:`runner_startup_progress`.
+    :param append_system_prompt: Raw author instructions for
+        ``--append-system-prompt``, applied on fresh launch and cold
+        resume only — the hot-reattach fast path below returns before
+        this is used, so it never relaunches or duplicates the flag.
     :returns: Prepared terminal details.
     :raises click.ClickException: If any server operation fails.
     """
@@ -4501,6 +4600,7 @@ async def _prepare_claude_terminal(
             command=command,
             bridge_dir=bridge_dir,
             claude_config=claude_config,
+            append_system_prompt=append_system_prompt,
         )
         _mark_startup_step(
             startup_profiler,
@@ -4544,7 +4644,7 @@ async def _fetch_claude_session_labels(
     if resp.status_code == 404:
         raise click.ClickException(
             f"Conversation {session_id!r} not found on the server. "
-            "Run `omnigent claude` (no --resume) to start a new session.",
+            f"Run `{cli_invocation()} claude` (no --resume) to start a new session.",
         )
     if resp.status_code >= 400:
         raise click.ClickException(
@@ -4588,7 +4688,7 @@ async def _resolve_cold_resume_args(
     if resp.status_code == 404:
         raise click.ClickException(
             f"Conversation {session_id!r} not found on the server. "
-            "Run `omnigent claude` (no --resume) to start a new session.",
+            f"Run `{cli_invocation()} claude` (no --resume) to start a new session.",
         )
     if resp.status_code >= 400:
         raise click.ClickException(
@@ -4606,7 +4706,7 @@ async def _resolve_cold_resume_args(
     if wrapper != _WRAPPER_LABEL_VALUE:
         raise click.ClickException(
             f"Conversation {session_id!r} is not a claude-native session "
-            f"(wrapper={wrapper!r}). Use `omnigent run --resume "
+            f"(wrapper={wrapper!r}). Use `{cli_invocation()} run --resume "
             f"{session_id}` to resume it through the right runtime.",
         )
     external_session_id = payload.get("external_session_id")
@@ -4687,7 +4787,25 @@ async def _ensure_local_claude_resume_transcript(
     target_dir = _claude_project_dir_for_cwd(current)
     target = target_dir / f"{external_session_id}.jsonl"
 
-    items = await _fetch_all_session_items_for_claude_resume(client, session_id)
+    try:
+        items = await _fetch_all_session_items_for_claude_resume(client, session_id)
+    except _ResumeHistoryUnavailableError:
+        # Server history is unreachable (5xx / dropped connections at every
+        # page size), but an intact local transcript from a previous run on
+        # this machine can still resume the conversation — far better than
+        # silently starting blank. It may be somewhat stale relative to the
+        # server, which the resumed session tolerates. 4xx contract errors
+        # (plain ClickException) still propagate: the server explicitly
+        # rejected the conversation, so reviving local history is unsafe.
+        if _is_resumable_claude_transcript(target):
+            _logger.warning(
+                "Could not fetch server history for %r; resuming from the "
+                "existing local transcript %s",
+                session_id,
+                target,
+            )
+            return target
+        raise
     # Items are persisted with unresolved file_id attachment blocks;
     # fetch the bytes back so the rebuilt transcript can reference a
     # live local file instead of silently dropping the attachment.
@@ -4721,6 +4839,47 @@ async def _ensure_local_claude_resume_transcript(
     return target
 
 
+def _is_resumable_claude_transcript(path: Path) -> bool:
+    """
+    Whether *path* holds a transcript ``claude --resume`` can start from.
+
+    ``--resume`` against an empty or non-JSONL file exits fatally instead of
+    starting, which for claude-native (terminal == agent) kills the session.
+    A transcript qualifies when at least one line parses as a JSON object —
+    the minimum Claude Code accepts as a conversation record.
+
+    :param path: Candidate ``<sid>.jsonl`` transcript path.
+    :returns: ``True`` when the file exists and holds a JSON-object line.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    return False
+                return isinstance(record, dict)
+    except (OSError, UnicodeDecodeError):
+        # A binary/non-UTF-8 file raises mid-iteration, outside the per-line
+        # JSON guard — it is just as unresumable as non-JSONL content.
+        return False
+    return False
+
+
+class _ResumeHistoryUnavailableError(click.ClickException):
+    """Server history stayed unreachable after every page-size retry.
+
+    Distinct from a plain :class:`click.ClickException` so callers can tell
+    "the backend cannot serve the rows right now" (a local-transcript
+    fallback is safe) apart from 4xx contract errors (the server explicitly
+    rejected the conversation — resuming local history could revive the
+    wrong session).
+    """
+
+
 async def _fetch_all_session_items_for_claude_resume(
     client: httpx.AsyncClient,
     session_id: str,
@@ -4738,14 +4897,54 @@ async def _fetch_all_session_items_for_claude_resume(
     """
     items: list[_JsonObject] = []
     after: str | None = None
+    limit = _CLAUDE_RESUME_ITEMS_PAGE_LIMIT
     while True:
-        params: dict[str, str | int] = {"limit": 1000, "order": "asc"}
+        params: dict[str, str | int] = {"limit": limit, "order": "asc"}
         if after is not None:
             params["after"] = after
-        resp = await client.get(
-            f"/v1/sessions/{url_component(session_id)}/items",
-            params=params,
-        )
+        try:
+            resp = await client.get(
+                f"/v1/sessions/{url_component(session_id)}/items",
+                params=params,
+            )
+        except httpx.TransportError as exc:
+            # A backend choking on one oversized page can also drop the
+            # connection mid-response instead of returning a clean 5xx;
+            # treat it the same way and retry the page smaller. Broad on
+            # purpose: total connectivity loss also degrades to the floor,
+            # then the local-transcript fallback rescues the resume.
+            if limit > _CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR:
+                limit = max(limit // 2, _CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR)
+                _logger.warning(
+                    "History page fetch for %r failed (%s); retrying at smaller limit=%d",
+                    session_id,
+                    type(exc).__name__,
+                    limit,
+                )
+                continue
+            raise _ResumeHistoryUnavailableError(
+                f"Failed to fetch history for {session_id!r}: {exc}"
+            ) from exc
+        if resp.status_code >= 500 and limit > _CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR:
+            # A deployed backend can fail reading one LARGE page of a big
+            # conversation while serving the same rows fine at smaller page
+            # sizes. The history is recoverable, so retry this page smaller
+            # instead of abandoning the resume (which silently launches a
+            # blank session). 4xx responses are contract errors and still
+            # raise immediately below.
+            limit = max(limit // 2, _CLAUDE_RESUME_ITEMS_PAGE_LIMIT_FLOOR)
+            _logger.warning(
+                "History page fetch for %r failed (%s); retrying at smaller limit=%d",
+                session_id,
+                resp.status_code,
+                limit,
+            )
+            continue
+        if resp.status_code >= 500:
+            raise _ResumeHistoryUnavailableError(
+                f"Failed to fetch history for {session_id!r} "
+                f"({resp.status_code}): {error_text(resp)}"
+            )
         if resp.status_code >= 400:
             raise click.ClickException(
                 f"Failed to fetch history for {session_id!r} "
@@ -5426,8 +5625,9 @@ async def _launch_claude_terminal(
     :param bridge_dir: Bridge directory shared with Claude's MCP
         MCP server and the web-chat harness.
     :param claude_config: Optional ucode-derived Claude Code config.
-    :param append_system_prompt: Optional framework-owned instructions for
-        this fresh native session.
+    :param append_system_prompt: Optional raw ``AgentSpec.instructions``
+        (author-supplied, not framework-composed) for this fresh native
+        session.
     :param allowed_tools: Optional narrowly scoped Claude tools preapproved
         for this native session.
     :returns: Terminal resource id.
@@ -5534,7 +5734,7 @@ async def _read_claude_terminal_tmux(
 
     Lets the caller decide whether to attach to the runner's tmux
     directly (same machine, low latency) instead of relaying over the
-    WebSocket PTY bridge. Best-effort: any lookup failure, non-200, or
+    WebSocket terminal bridge. Best-effort: any lookup failure, non-200, or
     missing metadata yields ``(None, None)``, which callers treat as
     "not locally attachable" and fall back to the WebSocket path.
 
@@ -5589,8 +5789,9 @@ def _claude_terminal_request(
     :param ap_auth_headers: Auth headers for the
         ``PermissionRequest`` command hook.
     :param claude_config: Optional ucode-derived Claude Code config.
-    :param append_system_prompt: Optional framework-owned instructions to
-        append to Claude Code's system prompt.
+    :param append_system_prompt: Optional raw ``AgentSpec.instructions``
+        (author-supplied, not framework-composed) to append to Claude
+        Code's system prompt.
     :param allowed_tools: Optional narrowly scoped Claude tools preapproved
         for this native session.
     :returns: JSON body for ``POST /resources/terminals``.
